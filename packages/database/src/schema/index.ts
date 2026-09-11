@@ -11,6 +11,7 @@ export * from "./notifications.schema.ts";
 export * from "./json.schema.ts";
 export * from "./fleet.schema.ts";
 export * from "./learning-space.schema.ts";
+export * from "./quizzes.schema.ts";
 
 // Import table interfaces to assemble unified Database schema
 import type {
@@ -98,6 +99,15 @@ import type {
   FleetTestControlTable,
 } from "./fleet.schema.ts";
 import type { LearningSpaceSessionTable } from "./learning-space.schema.ts";
+import type {
+  QuizTable,
+  QuizVersionTable,
+  QuizQuestionTable,
+  QuizQuestionOptionTable,
+  QuizAssignmentTable,
+  QuizAttemptTable,
+  QuizAttemptAnswerTable,
+} from "./quizzes.schema.ts";
 
 export interface Database {
   // Auth & Academy
@@ -183,6 +193,13 @@ export interface Database {
 
   // Learner state
   learning_space_sessions: LearningSpaceSessionTable;
+  quizzes: QuizTable;
+  quiz_versions: QuizVersionTable;
+  quiz_questions: QuizQuestionTable;
+  quiz_question_options: QuizQuestionOptionTable;
+  quiz_assignments: QuizAssignmentTable;
+  quiz_attempts: QuizAttemptTable;
+  quiz_attempt_answers: QuizAttemptAnswerTable;
 }
 
 export type PurchaseTable = OrderTable;
