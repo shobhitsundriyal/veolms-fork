@@ -5,6 +5,7 @@ export const mediaAssetTypeSchema = z.enum(["image", "video", "document"]);
 export const mediaAssetStatusSchema = z.enum([
   "uploading",
   "uploaded",
+  "processing",
   "ready",
   "failed",
 ]);
@@ -115,6 +116,7 @@ export const mediaAssetSchema = z.object({
   sizeBytes: z.coerce.number().int().nonnegative(),
   width: z.number().int().positive().nullable().optional(),
   height: z.number().int().positive().nullable().optional(),
+  metadata: z.record(z.string(), z.unknown()).nullable().optional(),
   durationSeconds: z.number().int().positive().nullable().optional(),
   status: mediaAssetStatusSchema,
   createdAt: z.string(),

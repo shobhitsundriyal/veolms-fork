@@ -38,6 +38,8 @@ The **Media Worker** is an ephemeral compute worker running on an EC2 instance o
 | `JOB_ID`                      | Optional job UUID assigned at launch                   | _Optional_           |
 | `STORAGE_PROVIDER`            | Storage provider (`s3` or `local`)                     | `s3`                 |
 | `S3_BUCKET`                   | S3 media bucket name                                   | _Required for S3_    |
+| `IMAGE_WORKER_MODE`           | Run the responsive-image queue instead of video jobs  | `false`              |
+| `IMAGE_WORKER_POLL_MS`        | Image queue polling interval                          | `2000`               |
 | `HEARTBEAT_INTERVAL_MS`       | Interval between PostgreSQL heartbeat writes           | `15000` (15s)        |
 | `PROGRESS_UPDATE_INTERVAL_MS` | Interval between progress writes & cancellation checks | `5000` (5s)          |
 | `WORKER_IDLE_POLL_SECONDS`    | Seconds to wait for new work before self-termination   | `15`                 |
@@ -46,6 +48,13 @@ The **Media Worker** is an ephemeral compute worker running on an EC2 instance o
 ---
 
 ## Running Tests
+
+Run the dedicated thumbnail process alongside the API (for PM2, use a second
+process entry with `IMAGE_WORKER_MODE=true`):
+
+```bash
+IMAGE_WORKER_MODE=true pnpm --filter @veolms/media-worker start
+```
 
 ```bash
 pnpm --filter @veolms/media-worker test
