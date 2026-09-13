@@ -19,6 +19,7 @@
     "@veolms/storage": "workspace:*",
     "kysely": "catalog:",
     "pg": "^8.22.0",
+    "sharp": "^0.34.5",
     "zod": "catalog:"
   },
   "devDependencies": {
