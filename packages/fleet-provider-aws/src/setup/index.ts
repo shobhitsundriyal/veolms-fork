@@ -2000,8 +2000,9 @@ async function runSetupFlow(
               CORSRules: [
                 {
                   AllowedHeaders: ["*"],
-                  AllowedMethods: ["GET", "HEAD"],
+                  AllowedMethods: ["GET", "HEAD", "PUT", "POST", "DELETE"],
                   AllowedOrigins: ["*"],
+                  ExposeHeaders: ["ETag", "Content-Length", "Content-Type"],
                   MaxAgeSeconds: 3600,
                 },
               ],
