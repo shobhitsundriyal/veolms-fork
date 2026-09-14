@@ -101,6 +101,7 @@ import {
 
 import {
   isMainModule,
+  promptStorageConfig,
   type ProviderConfigOptions,
   type ProviderConfigResult,
   type ProviderInfraOptions,
@@ -137,7 +138,7 @@ const LOG_RETENTION_DAYS = 30;
 
 type TargetEnv = "aws" | "localstack";
 type FleetMode = "serverless" | "serverful";
-type StorageProvider = "s3" | "other";
+type StorageProvider = "s3" | "local";
 type CredentialMode = "automatic" | "manual";
 type BootMode = "fresh" | "ami";
 type PricingModel = "spot" | "on-demand";
@@ -159,6 +160,11 @@ interface SetupAnswers {
   readonly s3BuildBucket?: string | null;
   readonly s3BucketAccess?: "private" | "public";
   readonly s3CredentialMode: CredentialMode | null;
+  readonly s3Endpoint?: string | null;
+  readonly s3Region?: string | null;
+  readonly s3AccessKeyId?: string | null;
+  readonly s3SecretAccessKey?: string | null;
+  readonly s3ForcePathStyle?: string | null;
   readonly allowedInstanceTypes: readonly string[];
   readonly bootMode: BootMode;
   readonly amiId: string | null;
@@ -1354,6 +1360,21 @@ async function generateEnvFiles(
   if (answers.s3BucketName) {
     fleetEnv["S3_BUCKET"] = answers.s3BucketName;
   }
+  if (answers.s3Endpoint) {
+    fleetEnv["S3_ENDPOINT"] = answers.s3Endpoint;
+  }
+  if (answers.s3Region) {
+    fleetEnv["S3_REGION"] = answers.s3Region;
+  }
+  if (answers.s3AccessKeyId) {
+    fleetEnv["S3_ACCESS_KEY_ID"] = answers.s3AccessKeyId;
+  }
+  if (answers.s3SecretAccessKey) {
+    fleetEnv["S3_SECRET_ACCESS_KEY"] = answers.s3SecretAccessKey;
+  }
+  if (answers.s3ForcePathStyle) {
+    fleetEnv["S3_FORCE_PATH_STYLE"] = answers.s3ForcePathStyle;
+  }
   if (answers.s3BuildBucket) {
     fleetEnv["S3_BUILD_BUCKET"] = answers.s3BuildBucket;
   }
@@ -1420,6 +1441,21 @@ async function generateEnvFiles(
       workerEnv["S3_USE_INSTANCE_ROLE"] = "true";
     }
   }
+  if (answers.s3Endpoint) {
+    workerEnv["S3_ENDPOINT"] = answers.s3Endpoint;
+  }
+  if (answers.s3Region) {
+    workerEnv["S3_REGION"] = answers.s3Region;
+  }
+  if (answers.s3AccessKeyId) {
+    workerEnv["S3_ACCESS_KEY_ID"] = answers.s3AccessKeyId;
+  }
+  if (answers.s3SecretAccessKey) {
+    workerEnv["S3_SECRET_ACCESS_KEY"] = answers.s3SecretAccessKey;
+  }
+  if (answers.s3ForcePathStyle) {
+    workerEnv["S3_FORCE_PATH_STYLE"] = answers.s3ForcePathStyle;
+  }
   if (answers.s3BuildBucket) {
     workerEnv["S3_BUILD_BUCKET"] = answers.s3BuildBucket;
   }
@@ -1474,6 +1510,18 @@ function parseSetupCliArgs(): Partial<SetupAnswers> & {
       result.s3BucketAccess = "public";
     } else if (arg.startsWith("--ami-name=") || arg.startsWith("--name=")) {
       result.amiName = val;
+    } else if (arg.startsWith("--storage=") || arg.startsWith("--storage-provider=")) {
+      result.storageProvider = val === "local" ? "local" : "s3";
+    } else if (arg.startsWith("--s3-endpoint=") || arg.startsWith("--endpoint=")) {
+      result.s3Endpoint = val;
+    } else if (arg.startsWith("--s3-region=")) {
+      result.s3Region = val;
+    } else if (arg.startsWith("--s3-access-key-id=")) {
+      result.s3AccessKeyId = val;
+    } else if (arg.startsWith("--s3-secret-access-key=")) {
+      result.s3SecretAccessKey = val;
+    } else if (arg.startsWith("--s3-force-path-style=")) {
+      result.s3ForcePathStyle = val;
     } else if (arg.startsWith("--db=") || arg.startsWith("--database-url=")) {
       result.databaseUrl = val;
     } else if (arg.startsWith("--mode=") || arg.startsWith("--fleet-mode=")) {
@@ -1506,6 +1554,7 @@ function loadExistingConfig(repoRoot: string): Partial<SetupAnswers> {
   };
   if (cliArgs.region) combined["AWS_REGION"] = cliArgs.region;
   if (cliArgs.profile) combined["AWS_PROFILE"] = cliArgs.profile;
+  if (cliArgs.storageProvider) combined["STORAGE_PROVIDER"] = cliArgs.storageProvider;
   if (cliArgs.s3BucketName) {
     combined["S3_BUCKET"] = cliArgs.s3BucketName;
     combined["STORAGE_PROVIDER"] = "s3";
@@ -1516,6 +1565,11 @@ function loadExistingConfig(repoRoot: string): Partial<SetupAnswers> {
   if (cliArgs.s3BucketAccess) {
     combined["S3_BUCKET_ACCESS"] = cliArgs.s3BucketAccess;
   }
+  if (cliArgs.s3Endpoint) combined["S3_ENDPOINT"] = cliArgs.s3Endpoint;
+  if (cliArgs.s3Region) combined["S3_REGION"] = cliArgs.s3Region;
+  if (cliArgs.s3AccessKeyId) combined["S3_ACCESS_KEY_ID"] = cliArgs.s3AccessKeyId;
+  if (cliArgs.s3SecretAccessKey) combined["S3_SECRET_ACCESS_KEY"] = cliArgs.s3SecretAccessKey;
+  if (cliArgs.s3ForcePathStyle) combined["S3_FORCE_PATH_STYLE"] = cliArgs.s3ForcePathStyle;
   if (cliArgs.amiName) {
     combined["AMI_NAME"] = cliArgs.amiName;
   }
@@ -1531,12 +1585,17 @@ function loadExistingConfig(repoRoot: string): Partial<SetupAnswers> {
   const fleetMode: FleetMode =
     combined["FLEET_MODE"] === "serverful" ? "serverful" : "serverless";
   const storageProvider: StorageProvider =
-    combined["STORAGE_PROVIDER"] === "other" ||
-    combined["STORAGE_PROVIDER"] === "local"
-      ? "other"
+    combined["STORAGE_PROVIDER"] === "local" ||
+    combined["STORAGE_PROVIDER"] === "other"
+      ? "local"
       : "s3";
   const s3BucketName = resolveS3BucketName(combined);
   const s3BuildBucket = resolveS3BuildBucketName(combined);
+  const s3Endpoint = combined["S3_ENDPOINT"] || null;
+  const s3Region = combined["S3_REGION"] || null;
+  const s3AccessKeyId = combined["S3_ACCESS_KEY_ID"] || null;
+  const s3SecretAccessKey = combined["S3_SECRET_ACCESS_KEY"] || null;
+  const s3ForcePathStyle = combined["S3_FORCE_PATH_STYLE"] || null;
   const rawBucketAccess = combined["S3_BUCKET_ACCESS"]?.toLowerCase().trim();
   const s3BucketAccess: "private" | "public" | undefined =
     rawBucketAccess === "public" || rawBucketAccess === "private"
@@ -1593,6 +1652,11 @@ function loadExistingConfig(repoRoot: string): Partial<SetupAnswers> {
     s3BuildBucket,
     s3BucketAccess,
     s3CredentialMode,
+    s3Endpoint,
+    s3Region,
+    s3AccessKeyId,
+    s3SecretAccessKey,
+    s3ForcePathStyle,
     allowedInstanceTypes,
     bootMode,
     amiId,
@@ -1813,378 +1877,156 @@ async function runSetupFlow(
 
   // ── Step 6: Storage Provider ───────────────────────────────────────────────
   step(6, TOTAL_STEPS, "Video Storage Provider");
-  const defaultStorageProvider = initialDefaults?.storageProvider ?? "s3";
-  const storageProvider = await askChoice(
+  const storageConfig = await promptStorageConfig({
     rl,
-    "Where will transcoded HLS output be stored?",
-    [
-      { label: "AWS S3 (recommended)", value: "s3" as StorageProvider },
-      {
-        label: "Other / local (no S3 permission added to EC2 role)",
-        value: "other" as StorageProvider,
-      },
-    ],
-    defaultStorageProvider === "other" ? 1 : 0,
-  );
+    provider: "aws",
+    existingEnv: {
+      STORAGE_PROVIDER: initialDefaults?.storageProvider,
+      S3_BUCKET: initialDefaults?.s3BucketName ?? undefined,
+      S3_ENDPOINT: initialDefaults?.s3Endpoint ?? undefined,
+      S3_REGION: initialDefaults?.s3Region ?? region,
+      S3_ACCESS_KEY_ID: initialDefaults?.s3AccessKeyId ?? undefined,
+      S3_SECRET_ACCESS_KEY: initialDefaults?.s3SecretAccessKey ?? undefined,
+      S3_FORCE_PATH_STYLE: initialDefaults?.s3ForcePathStyle ?? undefined,
+      S3_USE_INSTANCE_ROLE:
+        initialDefaults?.s3CredentialMode === "automatic" ? "true" : undefined,
+    },
+  });
 
+  const storageProvider: StorageProvider = storageConfig.storageProvider;
   let s3BucketName: string | null = null;
   let s3BuildBucket: string | null = null;
   let s3BucketAccess: "private" | "public" =
     initialDefaults?.s3BucketAccess ?? "private";
   let s3CredentialMode: CredentialMode | null = null;
+  let s3Endpoint: string | null = null;
+  let s3Region: string | null = null;
+  let s3AccessKeyId: string | null = null;
+  let s3SecretAccessKey: string | null = null;
+  let s3ForcePathStyle: string | null = null;
 
   if (storageProvider === "s3") {
-    const initialBucketExists = initialDefaults?.s3BucketName
-      ? (await checkS3Bucket(region, initialDefaults.s3BucketName)) === "exists"
-      : false;
-    const defaultBucketMode: "existing" | "create" = initialBucketExists
-      ? "existing"
-      : "create";
-    const bucketMode = await askChoice<"existing" | "create">(
-      rl,
-      "S3 bucket for transcoded HLS output?",
-      [
-        { label: "Use an existing bucket", value: "existing" },
-        { label: "Create a new bucket", value: "create" },
-      ],
-      defaultBucketMode === "existing" ? 0 : 1,
-    );
-
-    let defaultBucket = initialDefaults?.s3BucketName ?? "";
-    while (true) {
-      const bucketInput = await ask(
+    if (storageConfig.useIamRole) {
+      s3CredentialMode = "automatic";
+      const initialBucketExists = initialDefaults?.s3BucketName
+        ? (await checkS3Bucket(region, initialDefaults.s3BucketName)) === "exists"
+        : false;
+      const defaultBucketMode: "existing" | "create" = initialBucketExists
+        ? "existing"
+        : "create";
+      const bucketMode = await askChoice<"existing" | "create">(
         rl,
-        bucketMode === "create"
-          ? "New S3 bucket name (leave empty to skip)"
-          : "Existing S3 bucket name (leave empty to skip)",
-        defaultBucket || undefined,
-      );
-
-      if (!bucketInput) {
-        s3BucketName = null;
-        break;
-      }
-
-      if (!isValidS3BucketName(bucketInput)) {
-        warn(
-          `"${bucketInput}" is not a valid S3 bucket name — use 3-63 lowercase letters, digits, dots, or hyphens, starting and ending with a letter or digit.`,
-        );
-        defaultBucket = "";
-        continue;
-      }
-
-      info(`Checking bucket ${bold(bucketInput)}...`);
-      const bucketStatus = await checkS3Bucket(region, bucketInput);
-
-      if (bucketMode === "existing") {
-        if (bucketStatus === "exists") {
-          s3BucketName = bucketInput;
-          ok(
-            `Bucket ${bold(s3BucketName)} found and accessible — will grant EC2 role access.`,
-          );
-          break;
-        } else if (bucketStatus === "no-access") {
-          warn(
-            `Bucket ${bold(bucketInput)} exists but is owned by another AWS account or inaccessible (Access Denied).`,
-          );
-          defaultBucket = "";
-          continue;
-        } else {
-          warn(
-            `Bucket ${bold(bucketInput)} does not exist — nothing was created, since you chose to use an existing bucket.`,
-          );
-          info(
-            "Enter the correct existing bucket name, or leave empty to skip.",
-          );
-          defaultBucket = "";
-          continue;
-        }
-      }
-
-      // bucketMode === "create" — never silently reuse an existing bucket
-      if (bucketStatus === "exists" || bucketStatus === "no-access") {
-        warn(
-          `Bucket ${bold(bucketInput)} already exists${bucketStatus === "no-access" ? " (owned by another AWS account)" : ""} — S3 bucket names are globally unique across all AWS accounts.`,
-        );
-        info("Please enter a different name for the new bucket.");
-        defaultBucket = "";
-        continue;
-      }
-
-      const defaultBucketAccess: "private" | "public" =
-        initialDefaults?.s3BucketAccess ?? "private";
-      const bucketAccess = await askChoice<"private" | "public">(
-        rl,
-        "Media storage bucket access policy:",
+        "S3 bucket for transcoded HLS output?",
         [
-          {
-            label:
-              "Private (recommended — all public access blocked, IAM access only)",
-            value: "private",
-          },
-          {
-            label:
-              "Public (allows direct public read for HLS streams via S3 URLs)",
-            value: "public",
-          },
+          { label: "Use an existing bucket", value: "existing" },
+          { label: "Create a new bucket", value: "create" },
         ],
-        defaultBucketAccess === "public" ? 1 : 0,
+        defaultBucketMode === "existing" ? 0 : 1,
       );
 
-      info(
-        `Bucket ${bold(bucketInput)} does not exist. Creating in ${region}...`,
-      );
-      try {
-        const s3Client = new S3Client({ region });
-        if (region === "us-east-1") {
-          await s3Client.send(new CreateBucketCommand({ Bucket: bucketInput }));
-        } else {
-          await s3Client.send(
-            new CreateBucketCommand({
-              Bucket: bucketInput,
-              CreateBucketConfiguration: {
-                LocationConstraint: region as BucketLocationConstraint,
-              },
-            }),
-          );
-        }
-
-        if (bucketAccess === "private") {
-          await s3Client.send(
-            new PutPublicAccessBlockCommand({
-              Bucket: bucketInput,
-              PublicAccessBlockConfiguration: {
-                BlockPublicAcls: true,
-                IgnorePublicAcls: true,
-                BlockPublicPolicy: true,
-                RestrictPublicBuckets: true,
-              },
-            }),
-          );
-        } else {
-          await s3Client.send(
-            new PutPublicAccessBlockCommand({
-              Bucket: bucketInput,
-              PublicAccessBlockConfiguration: {
-                BlockPublicAcls: false,
-                IgnorePublicAcls: false,
-                BlockPublicPolicy: false,
-                RestrictPublicBuckets: false,
-              },
-            }),
-          );
-          const pubPolicy = JSON.stringify({
-            Version: "2012-10-17",
-            Statement: [
-              {
-                Sid: "PublicReadGetObject",
-                Effect: "Allow",
-                Principal: "*",
-                Action: "s3:GetObject",
-                Resource: `arn:aws:s3:::${bucketInput}/*`,
-              },
-            ],
-          });
-          await s3Client.send(
-            new PutBucketPolicyCommand({
-              Bucket: bucketInput,
-              Policy: pubPolicy,
-            }),
-          );
-        }
-
-        await s3Client.send(
-          new PutBucketCorsCommand({
-            Bucket: bucketInput,
-            CORSConfiguration: {
-              CORSRules: [
-                {
-                  AllowedHeaders: ["*"],
-                  AllowedMethods: ["GET", "HEAD"],
-                  AllowedOrigins: ["*"],
-                  MaxAgeSeconds: 3600,
-                },
-              ],
-            },
-          }),
-        );
-        s3BucketName = bucketInput;
-        s3BucketAccess = bucketAccess;
-        ok(
-          bucketAccess === "private"
-            ? `Created private S3 bucket ${bold(s3BucketName)} (all public access blocked, CORS enabled).`
-            : `Created public S3 bucket ${bold(s3BucketName)} with public read and CORS enabled.`,
-        );
-        break;
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        warn(`Could not create bucket "${bucketInput}": ${msg}`);
-        info("Please enter a different S3 bucket name.");
-        defaultBucket = "";
-        continue;
-      }
-    }
-
-    if (s3BucketName) {
-      const defaultCredMode =
-        initialDefaults?.s3CredentialMode === "manual" ? 1 : 0;
-      s3CredentialMode = await askChoice(
-        rl,
-        "How should workers authenticate to S3?",
-        [
-          {
-            label:
-              "Automatic — EC2 Instance Role (recommended, no key management)",
-            value: "automatic" as CredentialMode,
-          },
-          {
-            label:
-              "Manual — Provide AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY yourself",
-            value: "manual" as CredentialMode,
-          },
-        ],
-        defaultCredMode,
-      );
-
-      if (s3CredentialMode === "manual") {
-        warn(
-          "Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in apps/media-worker/.env.",
-        );
-      }
-
-      // S3 Build Bucket for worker scripts, Lambda packages, and worker logs
-      const defaultBuildOption: "dedicated" | "same" =
-        initialDefaults?.s3BuildBucket &&
-        initialDefaults.s3BuildBucket === s3BucketName
-          ? "same"
-          : "dedicated";
-
-      const buildBucketOption = await askChoice(
-        rl,
-        "Where should worker & lambda build scripts and logs be stored?",
-        [
-          {
-            label:
-              "Dedicated Private Build S3 Bucket (recommended — IAM access only, all public blocked)",
-            value: "dedicated",
-          },
-          {
-            label: "Reuse the video storage bucket",
-            value: "same",
-          },
-        ],
-        defaultBuildOption === "same" ? 1 : 0,
-      );
-
-      if (buildBucketOption === "same") {
-        s3BuildBucket = s3BucketName;
-        ok(`Using ${bold(s3BucketName)} as build bucket.`);
-      } else {
-        const initialBuildExists =
-          initialDefaults?.s3BuildBucket &&
-          initialDefaults.s3BuildBucket !== s3BucketName
-            ? (await checkS3Bucket(region, initialDefaults.s3BuildBucket)) ===
-              "exists"
-            : false;
-        const defaultBuildMode: "existing" | "create" = initialBuildExists
-          ? "existing"
-          : "create";
-
-        const buildMode = await askChoice<"existing" | "create">(
+      let defaultBucket = initialDefaults?.s3BucketName ?? "";
+      while (true) {
+        const bucketInput = await ask(
           rl,
-          "Private build bucket setup method:",
-          [
-            { label: "Use an existing private S3 bucket", value: "existing" },
-            { label: "Create a new private S3 build bucket", value: "create" },
-          ],
-          defaultBuildMode === "existing" ? 0 : 1,
+          bucketMode === "create"
+            ? "New S3 bucket name (leave empty to skip)"
+            : "Existing S3 bucket name (leave empty to skip)",
+          defaultBucket || undefined,
         );
 
-        let defaultBuildName =
-          initialDefaults?.s3BuildBucket &&
-          initialDefaults.s3BuildBucket !== s3BucketName
-            ? initialDefaults.s3BuildBucket
-            : `${s3BucketName}-build`;
+        if (!bucketInput) {
+          s3BucketName = null;
+          break;
+        }
 
-        while (true) {
-          const buildInput = await ask(
-            rl,
-            buildMode === "create"
-              ? "New private build S3 bucket name (leave empty to reuse storage bucket)"
-              : "Existing private build S3 bucket name (leave empty to reuse storage bucket)",
-            defaultBuildName || undefined,
+        if (!isValidS3BucketName(bucketInput)) {
+          warn(
+            `"${bucketInput}" is not a valid S3 bucket name — use 3-63 lowercase letters, digits, dots, or hyphens, starting and ending with a letter or digit.`,
           );
+          defaultBucket = "";
+          continue;
+        }
 
-          if (!buildInput) {
-            s3BuildBucket = s3BucketName;
+        info(`Checking bucket ${bold(bucketInput)}...`);
+        const bucketStatus = await checkS3Bucket(region, bucketInput);
+
+        if (bucketMode === "existing") {
+          if (bucketStatus === "exists") {
+            s3BucketName = bucketInput;
+            ok(
+              `Bucket ${bold(s3BucketName)} found and accessible — will grant EC2 role access.`,
+            );
             break;
-          }
-
-          if (!isValidS3BucketName(buildInput)) {
+          } else if (bucketStatus === "no-access") {
             warn(
-              `"${buildInput}" is not a valid S3 bucket name — use 3-63 lowercase letters, digits, dots, or hyphens.`,
+              `Bucket ${bold(bucketInput)} exists but is owned by another AWS account or inaccessible (Access Denied).`,
             );
-            defaultBuildName = "";
+            defaultBucket = "";
+            continue;
+          } else {
+            warn(
+              `Bucket ${bold(bucketInput)} does not exist — nothing was created, since you chose to use an existing bucket.`,
+            );
+            info(
+              "Enter the correct existing bucket name, or leave empty to skip.",
+            );
+            defaultBucket = "";
             continue;
           }
+        }
 
-          info(`Checking private build bucket ${bold(buildInput)}...`);
-          const buildStatus = await checkS3Bucket(region, buildInput);
-
-          if (buildMode === "existing") {
-            if (buildStatus === "exists") {
-              s3BuildBucket = buildInput;
-              ok(
-                `Private build bucket ${bold(s3BuildBucket)} found and accessible.`,
-              );
-              break;
-            } else if (buildStatus === "no-access") {
-              warn(
-                `Bucket ${bold(buildInput)} exists but is owned by another AWS account or inaccessible.`,
-              );
-              defaultBuildName = "";
-              continue;
-            } else {
-              warn(
-                `Bucket ${bold(buildInput)} does not exist — nothing was created.`,
-              );
-              defaultBuildName = "";
-              continue;
-            }
-          }
-
-          // create mode
-          if (buildStatus === "exists" || buildStatus === "no-access") {
-            warn(
-              `Bucket ${bold(buildInput)} already exists — please enter a unique name for the new private build bucket.`,
-            );
-            defaultBuildName = "";
-            continue;
-          }
-
-          info(
-            `Creating private build bucket ${bold(buildInput)} in ${region}...`,
+        // bucketMode === "create" — never silently reuse an existing bucket
+        if (bucketStatus === "exists" || bucketStatus === "no-access") {
+          warn(
+            `Bucket ${bold(bucketInput)} already exists${bucketStatus === "no-access" ? " (owned by another AWS account)" : ""} — S3 bucket names are globally unique across all AWS accounts.`,
           );
-          try {
-            const s3Client = new S3Client({ region });
-            if (region === "us-east-1") {
-              await s3Client.send(
-                new CreateBucketCommand({ Bucket: buildInput }),
-              );
-            } else {
-              await s3Client.send(
-                new CreateBucketCommand({
-                  Bucket: buildInput,
-                  CreateBucketConfiguration: {
-                    LocationConstraint: region as BucketLocationConstraint,
-                  },
-                }),
-              );
-            }
-            // Block all public access on build bucket (strictly private, accessible only via IAM)
+          info("Please enter a different name for the new bucket.");
+          defaultBucket = "";
+          continue;
+        }
+
+        const defaultBucketAccess: "private" | "public" =
+          initialDefaults?.s3BucketAccess ?? "private";
+        const bucketAccess = await askChoice<"private" | "public">(
+          rl,
+          "Media storage bucket access policy:",
+          [
+            {
+              label:
+                "Private (recommended — all public access blocked, IAM access only)",
+              value: "private",
+            },
+            {
+              label:
+                "Public (allows direct public read for HLS streams via S3 URLs)",
+              value: "public",
+            },
+          ],
+          defaultBucketAccess === "public" ? 1 : 0,
+        );
+
+        info(
+          `Bucket ${bold(bucketInput)} does not exist. Creating in ${region}...`,
+        );
+        try {
+          const s3Client = new S3Client({ region });
+          if (region === "us-east-1") {
+            await s3Client.send(new CreateBucketCommand({ Bucket: bucketInput }));
+          } else {
+            await s3Client.send(
+              new CreateBucketCommand({
+                Bucket: bucketInput,
+                CreateBucketConfiguration: {
+                  LocationConstraint: region as BucketLocationConstraint,
+                },
+              }),
+            );
+          }
+
+          if (bucketAccess === "private") {
             await s3Client.send(
               new PutPublicAccessBlockCommand({
-                Bucket: buildInput,
+                Bucket: bucketInput,
                 PublicAccessBlockConfiguration: {
                   BlockPublicAcls: true,
                   IgnorePublicAcls: true,
@@ -2193,19 +2035,239 @@ async function runSetupFlow(
                 },
               }),
             );
-            s3BuildBucket = buildInput;
-            ok(
-              `Created private build bucket ${bold(s3BuildBucket)} (all public access blocked).`,
+          } else {
+            await s3Client.send(
+              new PutPublicAccessBlockCommand({
+                Bucket: bucketInput,
+                PublicAccessBlockConfiguration: {
+                  BlockPublicAcls: false,
+                  IgnorePublicAcls: false,
+                  BlockPublicPolicy: false,
+                  RestrictPublicBuckets: false,
+                },
+              }),
             );
-            break;
-          } catch (err: unknown) {
-            const msg = err instanceof Error ? err.message : String(err);
-            warn(`Could not create build bucket "${buildInput}": ${msg}`);
-            defaultBuildName = "";
-            continue;
+            const pubPolicy = JSON.stringify({
+              Version: "2012-10-17",
+              Statement: [
+                {
+                  Sid: "PublicReadGetObject",
+                  Effect: "Allow",
+                  Principal: "*",
+                  Action: "s3:GetObject",
+                  Resource: `arn:aws:s3:::${bucketInput}/*`,
+                },
+              ],
+            });
+            await s3Client.send(
+              new PutBucketPolicyCommand({
+                Bucket: bucketInput,
+                Policy: pubPolicy,
+              }),
+            );
+          }
+
+          await s3Client.send(
+            new PutBucketCorsCommand({
+              Bucket: bucketInput,
+              CORSConfiguration: {
+                CORSRules: [
+                  {
+                    AllowedHeaders: ["*"],
+                    AllowedMethods: ["GET", "HEAD"],
+                    AllowedOrigins: ["*"],
+                    MaxAgeSeconds: 3600,
+                  },
+                ],
+              },
+            }),
+          );
+          s3BucketName = bucketInput;
+          s3BucketAccess = bucketAccess;
+          ok(
+            bucketAccess === "private"
+              ? `Created private S3 bucket ${bold(s3BucketName)} (all public access blocked, CORS enabled).`
+              : `Created public S3 bucket ${bold(s3BucketName)} with public read and CORS enabled.`,
+          );
+          break;
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          warn(`Could not create bucket "${bucketInput}": ${msg}`);
+          info("Please enter a different S3 bucket name.");
+          defaultBucket = "";
+          continue;
+        }
+      }
+
+      // S3 Build Bucket for worker scripts, Lambda packages, and worker logs
+      if (s3BucketName) {
+        const defaultBuildOption: "dedicated" | "same" =
+          initialDefaults?.s3BuildBucket &&
+          initialDefaults.s3BuildBucket === s3BucketName
+            ? "same"
+            : "dedicated";
+
+        const buildBucketOption = await askChoice(
+          rl,
+          "Where should worker & lambda build scripts and logs be stored?",
+          [
+            {
+              label:
+                "Dedicated Private Build S3 Bucket (recommended — IAM access only, all public blocked)",
+              value: "dedicated",
+            },
+            {
+              label: "Reuse the video storage bucket",
+              value: "same",
+            },
+          ],
+          defaultBuildOption === "same" ? 1 : 0,
+        );
+
+        if (buildBucketOption === "same") {
+          s3BuildBucket = s3BucketName;
+          ok(`Using ${bold(s3BucketName)} as build bucket.`);
+        } else {
+          const initialBuildExists =
+            initialDefaults?.s3BuildBucket &&
+            initialDefaults.s3BuildBucket !== s3BucketName
+              ? (await checkS3Bucket(region, initialDefaults.s3BuildBucket)) ===
+                "exists"
+              : false;
+          const defaultBuildMode: "existing" | "create" = initialBuildExists
+            ? "existing"
+            : "create";
+
+          const buildMode = await askChoice<"existing" | "create">(
+            rl,
+            "Private build bucket setup method:",
+            [
+              { label: "Use an existing private S3 bucket", value: "existing" },
+              { label: "Create a new private S3 build bucket", value: "create" },
+            ],
+            defaultBuildMode === "existing" ? 0 : 1,
+          );
+
+          let defaultBuildName =
+            initialDefaults?.s3BuildBucket &&
+            initialDefaults.s3BuildBucket !== s3BucketName
+              ? initialDefaults.s3BuildBucket
+              : `${s3BucketName}-build`;
+
+          while (true) {
+            const buildInput = await ask(
+              rl,
+              buildMode === "create"
+                ? "New private build S3 bucket name (leave empty to reuse storage bucket)"
+                : "Existing private build S3 bucket name (leave empty to reuse storage bucket)",
+              defaultBuildName || undefined,
+            );
+
+            if (!buildInput) {
+              s3BuildBucket = s3BucketName;
+              break;
+            }
+
+            if (!isValidS3BucketName(buildInput)) {
+              warn(
+                `"${buildInput}" is not a valid S3 bucket name — use 3-63 lowercase letters, digits, dots, or hyphens.`,
+              );
+              defaultBuildName = "";
+              continue;
+            }
+
+            info(`Checking private build bucket ${bold(buildInput)}...`);
+            const buildStatus = await checkS3Bucket(region, buildInput);
+
+            if (buildMode === "existing") {
+              if (buildStatus === "exists") {
+                s3BuildBucket = buildInput;
+                ok(
+                  `Private build bucket ${bold(s3BuildBucket)} found and accessible.`,
+                );
+                break;
+              } else if (buildStatus === "no-access") {
+                warn(
+                  `Bucket ${bold(buildInput)} exists but is owned by another AWS account or inaccessible.`,
+                );
+                defaultBuildName = "";
+                continue;
+              } else {
+                warn(
+                  `Bucket ${bold(buildInput)} does not exist — nothing was created.`,
+                );
+                defaultBuildName = "";
+                continue;
+              }
+            }
+
+            // create mode
+            if (buildStatus === "exists" || buildStatus === "no-access") {
+              warn(
+                `Bucket ${bold(buildInput)} already exists — please enter a unique name for the new private build bucket.`,
+              );
+              defaultBuildName = "";
+              continue;
+            }
+
+            info(
+              `Creating private build bucket ${bold(buildInput)} in ${region}...`,
+            );
+            try {
+              const s3Client = new S3Client({ region });
+              if (region === "us-east-1") {
+                await s3Client.send(
+                  new CreateBucketCommand({ Bucket: buildInput }),
+                );
+              } else {
+                await s3Client.send(
+                  new CreateBucketCommand({
+                    Bucket: buildInput,
+                    CreateBucketConfiguration: {
+                      LocationConstraint: region as BucketLocationConstraint,
+                    },
+                  }),
+                );
+              }
+              // Block all public access on build bucket (strictly private, accessible only via IAM)
+              await s3Client.send(
+                new PutPublicAccessBlockCommand({
+                  Bucket: buildInput,
+                  PublicAccessBlockConfiguration: {
+                    BlockPublicAcls: true,
+                    IgnorePublicAcls: true,
+                    BlockPublicPolicy: true,
+                    RestrictPublicBuckets: true,
+                  },
+                }),
+              );
+              s3BuildBucket = buildInput;
+              ok(
+                `Created private build bucket ${bold(s3BuildBucket)} (all public access blocked).`,
+              );
+              break;
+            } catch (err: unknown) {
+              const msg = err instanceof Error ? err.message : String(err);
+              warn(`Could not create build bucket "${buildInput}": ${msg}`);
+              defaultBuildName = "";
+              continue;
+            }
           }
         }
       }
+    } else {
+      // S3-compatible configuration without AWS IAM role
+      s3CredentialMode = "manual";
+      s3BucketName = storageConfig.s3Bucket || null;
+      s3Endpoint = storageConfig.s3Endpoint || null;
+      s3Region = storageConfig.s3Region || region;
+      s3AccessKeyId = storageConfig.s3AccessKeyId || null;
+      s3SecretAccessKey = storageConfig.s3SecretAccessKey || null;
+      s3ForcePathStyle = storageConfig.s3ForcePathStyle || null;
+      s3BuildBucket = s3BucketName;
+      ok(
+        `Configured S3-compatible storage with bucket ${bold(s3BucketName || "")}.`,
+      );
     }
   }
 
@@ -2396,9 +2458,9 @@ async function runSetupFlow(
       const tempIam = new IAMClient({ region });
       const workerRoleArn = await checkOrCreateRole(
         tempIam,
-        storageProvider === "s3" && s3BucketName !== null,
-        s3BucketName,
-        s3BuildBucket,
+        storageProvider === "s3" && s3BucketName !== null && s3CredentialMode === "automatic",
+        s3CredentialMode === "automatic" ? s3BucketName : null,
+        s3CredentialMode === "automatic" ? s3BuildBucket : null,
       );
       await createInstanceProfile(tempIam, workerRoleArn);
 
@@ -2570,6 +2632,11 @@ async function runSetupFlow(
     s3BuildBucket,
     s3BucketAccess,
     s3CredentialMode,
+    s3Endpoint,
+    s3Region,
+    s3AccessKeyId,
+    s3SecretAccessKey,
+    s3ForcePathStyle,
     allowedInstanceTypes,
     bootMode,
     amiId,
@@ -2635,9 +2702,9 @@ You can change them if needed.
   info("Setting up IAM role for EC2 workers and Lambda functions...");
   const workerRoleArn = await checkOrCreateRole(
     iam,
-    storageProvider === "s3" && s3BucketName !== null,
-    s3BucketName,
-    s3BuildBucket,
+    storageProvider === "s3" && s3BucketName !== null && s3CredentialMode === "automatic",
+    s3CredentialMode === "automatic" ? s3BucketName : null,
+    s3CredentialMode === "automatic" ? s3BuildBucket : null,
   );
 
   const instanceProfileArn = await createInstanceProfile(iam, workerRoleArn);
@@ -2678,6 +2745,21 @@ You can change them if needed.
     }
     if (s3BucketName) {
       lambdaEnvVars["S3_BUCKET"] = s3BucketName;
+    }
+    if (s3Endpoint) {
+      lambdaEnvVars["S3_ENDPOINT"] = s3Endpoint;
+    }
+    if (s3Region) {
+      lambdaEnvVars["S3_REGION"] = s3Region;
+    }
+    if (s3AccessKeyId) {
+      lambdaEnvVars["S3_ACCESS_KEY_ID"] = s3AccessKeyId;
+    }
+    if (s3SecretAccessKey) {
+      lambdaEnvVars["S3_SECRET_ACCESS_KEY"] = s3SecretAccessKey;
+    }
+    if (s3ForcePathStyle) {
+      lambdaEnvVars["S3_FORCE_PATH_STYLE"] = s3ForcePathStyle;
     }
     if (s3BuildBucket) {
       lambdaEnvVars["S3_BUILD_BUCKET"] = s3BuildBucket;
@@ -2764,7 +2846,7 @@ You can change them if needed.
   }
 
   const targetBuildBucket = s3BuildBucket || s3BucketName;
-  if (storageProvider === "s3" && targetBuildBucket) {
+  if (storageProvider === "s3" && targetBuildBucket && s3CredentialMode === "automatic") {
     info(
       "Building and uploading media worker script and Lambda packages to S3 build bucket...",
     );
@@ -2805,6 +2887,11 @@ You can change them if needed.
     s3BuildBucket,
     s3BucketAccess,
     s3CredentialMode,
+    s3Endpoint,
+    s3Region,
+    s3AccessKeyId,
+    s3SecretAccessKey,
+    s3ForcePathStyle,
     allowedInstanceTypes,
     bootMode,
     amiId,
@@ -2960,6 +3047,11 @@ async function runUpdateFlow(
   const keyName: string | null = existing.keyName ?? null;
   const s3CredentialMode: CredentialMode | null =
     existing.s3CredentialMode ?? (s3BucketName ? "automatic" : null);
+  const s3Endpoint: string | null = existing.s3Endpoint ?? null;
+  const s3Region: string | null = existing.s3Region ?? null;
+  const s3AccessKeyId: string | null = existing.s3AccessKeyId ?? null;
+  const s3SecretAccessKey: string | null = existing.s3SecretAccessKey ?? null;
+  const s3ForcePathStyle: string | null = existing.s3ForcePathStyle ?? null;
 
   if (targetEnv === "localstack" && endpointUrl) {
     process.env.AWS_ENDPOINT_URL = endpointUrl;
@@ -3064,9 +3156,9 @@ ${bold("Next Steps:")}
   info("Updating / verifying IAM role policies for EC2 workers...");
   const workerRoleArn = await checkOrCreateRole(
     iam,
-    storageProvider === "s3" && s3BucketName !== null,
-    s3BucketName,
-    s3BuildBucket,
+    storageProvider === "s3" && s3BucketName !== null && s3CredentialMode === "automatic",
+    s3CredentialMode === "automatic" ? s3BucketName : null,
+    s3CredentialMode === "automatic" ? s3BuildBucket : null,
   );
 
   const instanceProfileArn = await createInstanceProfile(iam, workerRoleArn);
@@ -3103,6 +3195,21 @@ ${bold("Next Steps:")}
     }
     if (s3BucketName) {
       lambdaEnvVars["S3_BUCKET"] = s3BucketName;
+    }
+    if (s3Endpoint) {
+      lambdaEnvVars["S3_ENDPOINT"] = s3Endpoint;
+    }
+    if (s3Region) {
+      lambdaEnvVars["S3_REGION"] = s3Region;
+    }
+    if (s3AccessKeyId) {
+      lambdaEnvVars["S3_ACCESS_KEY_ID"] = s3AccessKeyId;
+    }
+    if (s3SecretAccessKey) {
+      lambdaEnvVars["S3_SECRET_ACCESS_KEY"] = s3SecretAccessKey;
+    }
+    if (s3ForcePathStyle) {
+      lambdaEnvVars["S3_FORCE_PATH_STYLE"] = s3ForcePathStyle;
     }
     if (s3BuildBucket) {
       lambdaEnvVars["S3_BUILD_BUCKET"] = s3BuildBucket;
@@ -3144,9 +3251,7 @@ ${bold("Next Steps:")}
             architecture: lambdaArch,
             log: true,
           });
-
           const lambdaClient = new LambdaClient({ region });
-          info("Publishing veolms-ffprobe layer to AWS Lambda...");
           ffprobeLayerArn = await publishFfprobeLayer({
             lambdaClient,
             zipPath,
@@ -3161,10 +3266,10 @@ ${bold("Next Steps:")}
         }
       }
 
-      info("Setting up CloudWatch log group for Probe Lambda...");
+      info("Ensuring CloudWatch log group for Probe Lambda...");
       await ensureLogGroup(cw, LOG_GROUP_PROBE);
 
-      info("Setting up Video Metadata Probe Lambda function...");
+      info("Updating Video Metadata Probe Lambda function...");
       const probeEnvVars: Record<string, string> = {
         FLEET_MANAGER_LAMBDA_NAME: LAMBDA_FUNCTION_NAME,
       };
@@ -3189,7 +3294,7 @@ ${bold("Next Steps:")}
   }
 
   const targetBuildBucket = s3BuildBucket || s3BucketName;
-  if (storageProvider === "s3" && targetBuildBucket) {
+  if (storageProvider === "s3" && targetBuildBucket && s3CredentialMode === "automatic") {
     info("Rebuilding and uploading build artifacts to S3 build bucket...");
     await buildAndUploadBuildArtifacts({
       buildBucketName: targetBuildBucket,
@@ -3213,6 +3318,11 @@ ${bold("Next Steps:")}
     s3BucketName,
     s3BuildBucket,
     s3CredentialMode,
+    s3Endpoint,
+    s3Region,
+    s3AccessKeyId,
+    s3SecretAccessKey,
+    s3ForcePathStyle,
     allowedInstanceTypes,
     bootMode,
     amiId,

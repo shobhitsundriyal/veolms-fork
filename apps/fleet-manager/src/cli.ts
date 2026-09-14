@@ -529,10 +529,14 @@ export async function runCli(
         try {
           setupFn = await loadModuleFunction<
             (options?: unknown) => Promise<void>
-          >(
-            packageName,
-            "provisionInfra",
-            `Provider setup package "${packageName}" does not export a "provisionInfra" function.`,
+          >(packageName, "runInfraSetup").catch(() =>
+            loadModuleFunction<
+              (options?: unknown) => Promise<void>
+            >(
+              packageName,
+              "provisionInfra",
+              `Provider setup package "${packageName}" does not export "runInfraSetup" or "provisionInfra".`,
+            ),
           );
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -549,12 +553,14 @@ export async function runCli(
               ? false
               : undefined;
 
+        const isUpdate = command === "update" || Boolean(flags["update"]);
+
         try {
           await setupFn({
             nonInteractive: Boolean(
               flags["yes"] || flags["y"] || flags["non-interactive"],
             ),
-            update: Boolean(flags["update"]),
+            update: isUpdate,
             start: shouldStart,
             ...flags,
           });
@@ -580,10 +586,14 @@ export async function runCli(
         try {
           destroyFn = await loadModuleFunction<
             (options?: unknown) => Promise<void>
-          >(
-            packageName,
-            "destroyInfra",
-            `Provider destroy package "${packageName}" does not export a "destroyInfra" function.`,
+          >(packageName, "runDestroy").catch(() =>
+            loadModuleFunction<
+              (options?: unknown) => Promise<void>
+            >(
+              packageName,
+              "destroyInfra",
+              `Provider destroy package "${packageName}" does not export "runDestroy" or "destroyInfra".`,
+            ),
           );
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -839,7 +849,8 @@ export async function runCli(
                 .execute();
             }
 
-            const storageProvider = normalized === "aws" ? "s3" : "local";
+            const storageProvider =
+              cfg.STORAGE_PROVIDER || (normalized === "aws" ? "s3" : "local");
             await db
               .insertInto("media_assets")
               .values({
@@ -856,7 +867,8 @@ export async function runCli(
               .execute();
           } else {
             const updates: Record<string, unknown> = {};
-            const storageProvider = normalized === "aws" ? "s3" : "local";
+            const storageProvider =
+              cfg.STORAGE_PROVIDER || (normalized === "aws" ? "s3" : "local");
             if (existingMedia.storage_provider !== storageProvider) {
               updates.storage_provider = storageProvider;
             }
@@ -950,7 +962,8 @@ Usage:
   fleet prune                   Terminate stalled zombie workers
   fleet test fault <scenario>   Inject a guarded local test fault
   fleet test watch --job <id>   Watch a job until it reaches a terminal state
-  fleet infra [--update] [--start] Provision or update infrastructure for FLEET_PROVIDER
+  fleet infra [--update] [--start] Provision infrastructure for FLEET_PROVIDER
+  fleet update                  Update infrastructure or refresh configuration for FLEET_PROVIDER
   fleet destroy [--stop-only]   Teardown or stop infrastructure for FLEET_PROVIDER
   fleet trigger                 Queue & trigger test transcode task
 `);

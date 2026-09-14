@@ -118,4 +118,48 @@ describe("Local Fleet Provider", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it("exports lifecycle setup modules and supports configureEnv with local storage", async () => {
+    const { configureEnv, provisionInfra } = await import(
+      "../src/setup/index.ts"
+    );
+    assert.equal(typeof configureEnv, "function");
+    assert.equal(typeof provisionInfra, "function");
+
+    const responses = [
+      "postgresql://test:test@localhost:5432/test", // db url
+      "1", // local storage
+    ];
+    const mockRl = {
+      question: async () => responses.shift() ?? "",
+    } as any;
+
+    const res = await configureEnv({ rl: mockRl, nonInteractive: false });
+    assert.equal(res.provider, "local");
+    assert.equal(res.details?.storageProvider, "local");
+    assert.equal(res.envFiles.length, 2);
+  });
+
+  it("supports configureEnv with s3 storage for local provider", async () => {
+    const { configureEnv } = await import("../src/setup/index.ts");
+    const responses = [
+      "postgresql://test:test@localhost:5432/test", // db url
+      "2", // s3 storage
+      "local-minio-bucket", // bucket
+      "http://localhost:9000", // endpoint
+      "us-east-1", // region
+      "minioadmin", // access key
+      "miniopassword", // secret key
+      "1", // path style: true
+    ];
+    const mockRl = {
+      question: async () => responses.shift() ?? "",
+    } as any;
+
+    const res = await configureEnv({ rl: mockRl, nonInteractive: false });
+    assert.equal(res.provider, "local");
+    assert.equal(res.details?.storageProvider, "s3");
+    assert.equal(res.details?.S3_BUCKET, "local-minio-bucket");
+    assert.equal(res.details?.S3_ENDPOINT, "http://localhost:9000");
+  });
 });

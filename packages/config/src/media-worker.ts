@@ -57,9 +57,9 @@ const baseMediaWorkerConfigSchema = z.object({
   S3_SECRET_ACCESS_KEY: z.string().optional(),
   AWS_REGION: z.string().optional(),
   S3_FORCE_PATH_STYLE: z
-    .enum(["true", "false"])
+    .union([z.boolean(), z.enum(["true", "false"])])
     .optional()
-    .transform((val) => val === "true"),
+    .transform((val) => val === true || val === "true"),
   SCRATCH_DIR: z.string().default("/tmp/veolms-worker"),
   HEARTBEAT_INTERVAL_MS: z.coerce.number().int().min(1000).default(15000),
   HEARTBEAT_DRAIN_TIMEOUT_MS: z.coerce.number().int().min(0).default(5000),

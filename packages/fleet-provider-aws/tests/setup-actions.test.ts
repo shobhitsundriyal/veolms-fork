@@ -240,4 +240,131 @@ describe("AWS Setup Module Interface", () => {
     assert.ok(s3Statement.Action.includes("s3:DeleteObject"));
     assert.ok(s3Statement.Action.includes("s3:DeleteObjectVersion"));
   });
+
+  it("should write local storage provider without S3 bucket", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "veolms-env-local-"));
+    const fleetEnvDir = path.join(tempDir, "apps", "fleet-manager");
+    const workerEnvDir = path.join(tempDir, "apps", "media-worker");
+    fs.mkdirSync(fleetEnvDir, { recursive: true });
+    fs.mkdirSync(workerEnvDir, { recursive: true });
+
+    try {
+      const answers: any = {
+        targetEnv: "aws",
+        region: "us-east-1",
+        fleetMode: "serverless",
+        databaseUrl: "postgresql://localhost:5432/db",
+        storageProvider: "local",
+        s3BucketName: null,
+        maxWorkers: 2,
+        workerIdlePollSeconds: 15,
+        useSpot: true,
+        bootMode: "ami",
+        allowedInstanceTypes: ["c7g.large"],
+      };
+      const result: any = {
+        workerRoleArn: "arn:aws:iam::123:role/r",
+        instanceProfileArn: "arn:aws:iam::123:instance-profile/p",
+        logGroupWorkers: "/w",
+        logGroupFleet: "/f",
+        lambdaFunctionArn: null,
+        probeLambdaArn: null,
+        s3BucketName: null,
+      };
+
+      await setupModule.generateEnvFiles(answers, result, tempDir);
+
+      const fleetEnv = setupModule.parseEnvFile(path.join(fleetEnvDir, ".env"));
+      const workerEnv = setupModule.parseEnvFile(path.join(workerEnvDir, ".env"));
+
+      assert.equal(fleetEnv["STORAGE_PROVIDER"], "local");
+      assert.equal(workerEnv["STORAGE_PROVIDER"], "local");
+      assert.equal(fleetEnv["S3_BUCKET"], undefined);
+      assert.equal(workerEnv["S3_BUCKET"], undefined);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("should write S3-compatible credentials to .env files", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "veolms-env-s3-"));
+    const fleetEnvDir = path.join(tempDir, "apps", "fleet-manager");
+    const workerEnvDir = path.join(tempDir, "apps", "media-worker");
+    fs.mkdirSync(fleetEnvDir, { recursive: true });
+    fs.mkdirSync(workerEnvDir, { recursive: true });
+
+    try {
+      const answers: any = {
+        targetEnv: "aws",
+        region: "us-east-1",
+        fleetMode: "serverless",
+        databaseUrl: "postgresql://localhost:5432/db",
+        storageProvider: "s3",
+        s3BucketName: "minio-media",
+        s3Endpoint: "http://localhost:9000",
+        s3Region: "us-east-1",
+        s3AccessKeyId: "minioadmin",
+        s3SecretAccessKey: "miniopassword",
+        s3ForcePathStyle: "true",
+        maxWorkers: 2,
+        workerIdlePollSeconds: 15,
+        useSpot: true,
+        bootMode: "ami",
+        allowedInstanceTypes: ["c7g.large"],
+      };
+      const result: any = {
+        workerRoleArn: "arn:aws:iam::123:role/r",
+        instanceProfileArn: "arn:aws:iam::123:instance-profile/p",
+        logGroupWorkers: "/w",
+        logGroupFleet: "/f",
+        lambdaFunctionArn: null,
+        probeLambdaArn: null,
+        s3BucketName: "minio-media",
+      };
+
+      await setupModule.generateEnvFiles(answers, result, tempDir);
+
+      const fleetEnv = setupModule.parseEnvFile(path.join(fleetEnvDir, ".env"));
+      const workerEnv = setupModule.parseEnvFile(path.join(workerEnvDir, ".env"));
+
+      assert.equal(fleetEnv["STORAGE_PROVIDER"], "s3");
+      assert.equal(fleetEnv["S3_BUCKET"], "minio-media");
+      assert.equal(fleetEnv["S3_ENDPOINT"], "http://localhost:9000");
+      assert.equal(fleetEnv["S3_ACCESS_KEY_ID"], "minioadmin");
+      assert.equal(fleetEnv["S3_SECRET_ACCESS_KEY"], "miniopassword");
+      assert.equal(fleetEnv["S3_FORCE_PATH_STYLE"], "true");
+
+      assert.equal(workerEnv["STORAGE_PROVIDER"], "s3");
+      assert.equal(workerEnv["S3_BUCKET"], "minio-media");
+      assert.equal(workerEnv["S3_ENDPOINT"], "http://localhost:9000");
+      assert.equal(workerEnv["S3_ACCESS_KEY_ID"], "minioadmin");
+      assert.equal(workerEnv["S3_SECRET_ACCESS_KEY"], "miniopassword");
+      assert.equal(workerEnv["S3_FORCE_PATH_STYLE"], "true");
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("should load S3-compatible credentials in loadExistingConfig", () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "veolms-cfg-s3-"));
+    const fleetEnvDir = path.join(tempDir, "apps", "fleet-manager");
+    fs.mkdirSync(fleetEnvDir, { recursive: true });
+
+    try {
+      fs.writeFileSync(
+        path.join(fleetEnvDir, ".env"),
+        "STORAGE_PROVIDER=s3\nS3_BUCKET=r2-media\nS3_ENDPOINT=https://r2.cloudflarestorage.com\nS3_ACCESS_KEY_ID=key123\nS3_SECRET_ACCESS_KEY=sec456\nS3_FORCE_PATH_STYLE=true\n",
+      );
+
+      const config = setupModule.loadExistingConfig(tempDir);
+      assert.equal(config.storageProvider, "s3");
+      assert.equal(config.s3BucketName, "r2-media");
+      assert.equal(config.s3Endpoint, "https://r2.cloudflarestorage.com");
+      assert.equal(config.s3AccessKeyId, "key123");
+      assert.equal(config.s3SecretAccessKey, "sec456");
+      assert.equal(config.s3ForcePathStyle, "true");
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 });
