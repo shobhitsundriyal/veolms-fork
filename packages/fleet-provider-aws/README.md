@@ -10,7 +10,7 @@ AWS infrastructure provider for the VeoLMS transcoding pipeline. Manages ephemer
 - **Video Metadata Probe Lambda (`veolms-video-metadata-probe`)**: Pre-probes video resolution, duration, FPS, and codecs via `ffprobe` over presigned S3 URLs, forwarding enriched payloads to Fleet Manager.
 - **Direct Cancellation Forwarding**: Forwards cancellation events (`{ jobId, status: "cancelled" }`) directly from the Probe Lambda to Fleet Manager without probing.
 - **Dynamic Debian 13 AMI Resolution**: Resolves latest Debian point-release AMIs via AWS public SSM parameters (`/aws/service/debian/release/13/latest/${arch}`) with a 6-hour TTL cache.
-- **Pre-baked AMI Builder**: Interactive builder (`pnpm fleet:build-ami`) creates custom AMIs with Node.js 24, FFmpeg, and AWS CLI pre-installed for **<30s boot times**.
+- **Pre-baked AMI Builder**: Interactive builder (`pnpm fleet:build-ami`) creates custom AMIs with Node.js 24, FFmpeg, AWS CLI, and architecture-matched `sharp` pre-installed for **<30s boot times**.
 - **Trap-Protected UserData Bootstrapper**: Slices environment variables securely into `/opt/veolms/worker.env`, downloads the bundled media-worker from S3, and executes with a trap that automatically uploads logs to S3 and terminates the EC2 instance on any failure or exit.
 - **AWS EventBridge Scheduler Dynamic Triggers**: Creates one-shot `at(timestamp)` schedules targeting the Fleet Manager Lambda via `@aws-sdk/client-scheduler`, deleting them automatically when no active workers remain.
 - **Two-Way Cluster Discovery**: Lists and maps real EC2 instance states with tag filters (`tag:ManagedBy=veolms-fleet-manager`) for cluster reconciliation.
