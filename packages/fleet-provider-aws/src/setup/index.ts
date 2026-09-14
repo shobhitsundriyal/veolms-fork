@@ -789,6 +789,7 @@ export async function buildAndUploadWorkerBundle(
       platform: "node",
       target: "node22",
       format: "cjs",
+      external: ["sharp"],
       outfile,
       logLevel: "silent",
     });

@@ -17,14 +17,14 @@ that should poll for compatible work.
 
 ## Storage
 
-| Variable                   | Default        | Meaning                                                     |
-| -------------------------- | -------------- | ----------------------------------------------------------- |
-| `S3_BUCKET`                | `veolms-media` | Primary S3 bucket for video uploads and outputs.            |
-| `S3_REGION`                | `us-east-1`    | S3 region. `AWS_REGION` is accepted as an alias.            |
-| `S3_ENDPOINT`              | unset          | Custom S3-compatible endpoint.                              |
-| `S3_FORCE_PATH_STYLE`      | unset          | Set `true` for path-style S3-compatible endpoints.          |
-| `HTTP_DOWNLOAD_TIMEOUT_MS` | `300000`       | HTTP download timeout in milliseconds.                      |
-| `HTTP_DOWNLOAD_MAX_BYTES`  | `53687091200`  | Maximum source size for HTTP, S3, and local files (50 GiB). |
+| Variable                   | Default        | Meaning                                                           |
+| -------------------------- | -------------- | ----------------------------------------------------------------- |
+| `S3_BUCKET`                | `veolms-media` | Primary S3 bucket alias; `STORAGE_BUCKET` wins when both are set. |
+| `S3_REGION`                | `us-east-1`    | S3 region. `AWS_REGION` is accepted as an alias.                  |
+| `S3_ENDPOINT`              | unset          | S3 endpoint alias; `STORAGE_ENDPOINT` wins when both are set.     |
+| `S3_FORCE_PATH_STYLE`      | unset          | Set `true` for path-style S3-compatible endpoints.                |
+| `HTTP_DOWNLOAD_TIMEOUT_MS` | `300000`       | HTTP download timeout in milliseconds.                            |
+| `HTTP_DOWNLOAD_MAX_BYTES`  | `53687091200`  | Maximum source size for HTTP, S3, and local files (50 GiB).       |
 
 ## Monitoring and worker reuse
 
