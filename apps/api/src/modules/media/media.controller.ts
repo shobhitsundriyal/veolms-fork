@@ -18,7 +18,12 @@ export function createMediaController({ service }: { service: MediaService }) {
   ) {
     const { mediaId } = request.params;
     const ownerId = request.user!.id;
-    const result = await service.confirmUpload(mediaId, ownerId, request.log);
+    const result = await service.confirmUpload(
+      mediaId,
+      ownerId,
+      request.log,
+      request.user?.roles,
+    );
     return { status: result.status };
   }
 
@@ -27,7 +32,11 @@ export function createMediaController({ service }: { service: MediaService }) {
   ) {
     const { mediaId } = request.params;
     const ownerId = request.user!.id;
-    return await service.getVideoJobProgress(mediaId, ownerId);
+    return await service.getVideoJobProgress(
+      mediaId,
+      ownerId,
+      request.user?.roles,
+    );
   }
 
   async function getPlaybackBootstrap(
@@ -82,6 +91,7 @@ export function createMediaController({ service }: { service: MediaService }) {
       request.params.mediaId,
       request.user!.id,
       request.log,
+      request.user?.roles,
     );
   }
 
@@ -92,6 +102,7 @@ export function createMediaController({ service }: { service: MediaService }) {
       request.params.mediaId,
       request.user!.id,
       request.log,
+      request.user?.roles,
     );
   }
 
@@ -141,6 +152,7 @@ export function createMediaController({ service }: { service: MediaService }) {
         const progress = await service.getVideoJobProgress(
           request.params.mediaId,
           request.user!.id,
+          request.user?.roles,
         );
         response.write(
           `event: progress\ndata: ${JSON.stringify(progress)}\n\n`,
@@ -164,7 +176,11 @@ export function createMediaController({ service }: { service: MediaService }) {
   ) {
     const { mediaId } = request.params;
     const requestingUserId = request.user?.id;
-    const result = await service.getMediaStream(mediaId, requestingUserId);
+    const result = await service.getMediaStream(
+      mediaId,
+      requestingUserId,
+      request.user?.roles,
+    );
     reply.header("Content-Type", result.contentType);
     if (result.contentLength !== undefined) {
       reply.header("Content-Length", result.contentLength);
@@ -172,6 +188,13 @@ export function createMediaController({ service }: { service: MediaService }) {
     // Assets whose public access can be revoked (e.g. unpublished/deleted courses
     // or replaced thumbnails) must not be retained in shared caches.
     reply.header("Cache-Control", "no-store");
+    return reply.send(result.stream);
+  }
+
+  async function getImageVariantStream(request: FastifyRequest<{ Params: { mediaId: string; width: number } }>, reply: FastifyReply) {
+    const result = await service.getImageVariantStream(request.params.mediaId, Number(request.params.width), request.user?.id, request.user?.roles);
+    reply.header("Content-Type", result.contentType).header("Cache-Control", "public, max-age=31536000, immutable");
+    if (result.contentLength !== undefined) reply.header("Content-Length", result.contentLength);
     return reply.send(result.stream);
   }
 
@@ -185,6 +208,7 @@ export function createMediaController({ service }: { service: MediaService }) {
     cancelVideoJob,
     streamVideoJobProgress,
     getMediaAssetStream,
+    getImageVariantStream,
   };
 }
 

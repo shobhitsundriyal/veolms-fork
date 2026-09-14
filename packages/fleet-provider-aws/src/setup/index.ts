@@ -2074,8 +2074,9 @@ async function runSetupFlow(
                 CORSRules: [
                   {
                     AllowedHeaders: ["*"],
-                    AllowedMethods: ["GET", "HEAD"],
+                    AllowedMethods: ["GET", "HEAD", "PUT", "POST", "DELETE"],
                     AllowedOrigins: ["*"],
+                    ExposeHeaders: ["ETag", "Content-Length", "Content-Type"],
                     MaxAgeSeconds: 3600,
                   },
                 ],
@@ -2835,6 +2836,21 @@ You can change them if needed.
       if (endpointUrl) {
         probeEnvVars["AWS_ENDPOINT_URL"] = endpointUrl;
       }
+      if (s3Endpoint || process.env.S3_ENDPOINT) {
+        probeEnvVars["S3_ENDPOINT"] = (s3Endpoint || process.env.S3_ENDPOINT)!;
+      }
+      if (s3Region || process.env.S3_REGION) {
+        probeEnvVars["S3_REGION"] = (s3Region || process.env.S3_REGION)!;
+      }
+      if (s3AccessKeyId || process.env.S3_ACCESS_KEY_ID) {
+        probeEnvVars["S3_ACCESS_KEY_ID"] = (s3AccessKeyId || process.env.S3_ACCESS_KEY_ID)!;
+      }
+      if (s3SecretAccessKey || process.env.S3_SECRET_ACCESS_KEY) {
+        probeEnvVars["S3_SECRET_ACCESS_KEY"] = (s3SecretAccessKey || process.env.S3_SECRET_ACCESS_KEY)!;
+      }
+      if (s3ForcePathStyle || process.env.S3_FORCE_PATH_STYLE) {
+        probeEnvVars["S3_FORCE_PATH_STYLE"] = (s3ForcePathStyle || process.env.S3_FORCE_PATH_STYLE)!;
+      }
       probeLambdaArn = await setupProbeLambda(
         region,
         workerRoleArn, // Same shared IAM role
@@ -3282,6 +3298,21 @@ ${bold("Next Steps:")}
       }
       if (endpointUrl) {
         probeEnvVars["AWS_ENDPOINT_URL"] = endpointUrl;
+      }
+      if (s3Endpoint || process.env.S3_ENDPOINT) {
+        probeEnvVars["S3_ENDPOINT"] = (s3Endpoint || process.env.S3_ENDPOINT)!;
+      }
+      if (s3Region || process.env.S3_REGION) {
+        probeEnvVars["S3_REGION"] = (s3Region || process.env.S3_REGION)!;
+      }
+      if (s3AccessKeyId || process.env.S3_ACCESS_KEY_ID) {
+        probeEnvVars["S3_ACCESS_KEY_ID"] = (s3AccessKeyId || process.env.S3_ACCESS_KEY_ID)!;
+      }
+      if (s3SecretAccessKey || process.env.S3_SECRET_ACCESS_KEY) {
+        probeEnvVars["S3_SECRET_ACCESS_KEY"] = (s3SecretAccessKey || process.env.S3_SECRET_ACCESS_KEY)!;
+      }
+      if (s3ForcePathStyle || process.env.S3_FORCE_PATH_STYLE) {
+        probeEnvVars["S3_FORCE_PATH_STYLE"] = (s3ForcePathStyle || process.env.S3_FORCE_PATH_STYLE)!;
       }
       probeLambdaArn = await setupProbeLambda(
         region,

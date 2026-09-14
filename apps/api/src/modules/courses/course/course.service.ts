@@ -22,6 +22,7 @@ import {
 } from "../shared/courses.utils.ts";
 import {
   ADMIN_ROLE,
+  INSTRUCTOR_ROLE,
   createAuthService,
   type AuthService,
 } from "../../auth/index.ts";
@@ -51,6 +52,84 @@ const ALLOWED_THUMBNAIL_MIME_TYPES = new Set([
   "image/gif",
   "image/avif",
 ]);
+
+type PublicThumbnailVariant = {
+  url: string;
+  width: number;
+  height: number;
+};
+
+const FALLBACK_THUMBNAIL_WIDTHS = [160, 240, 320, 480, 640, 960, 1280] as const;
+
+function resolveFallbackThumbnailVariants(
+  services: AppServices,
+  thumbnailMediaId?: string | null,
+): PublicThumbnailVariant[] {
+  if (!thumbnailMediaId) return [];
+
+  return FALLBACK_THUMBNAIL_WIDTHS.flatMap((width) => {
+    const url = services.storage.getPublicObjectUrl(
+      `thumbnails/${thumbnailMediaId}/processed/${width}.webp`,
+    );
+    return url ? [{ url, width, height: Math.round((width * 9) / 16) }] : [];
+  });
+}
+
+function resolvePublicThumbnailUrls(
+  services: AppServices,
+  metadata: unknown,
+  thumbnailMediaId?: string | null,
+): {
+  thumbnailUrl: string | null;
+  thumbnailSrcSet: PublicThumbnailVariant[];
+} {
+  const fallbackUrl = thumbnailMediaId
+    ? services.storage.getPublicObjectUrl(
+        `thumbnails/${thumbnailMediaId}/processed/full.webp`,
+      )
+    : null;
+  const fallbackVariants = resolveFallbackThumbnailVariants(
+    services,
+    thumbnailMediaId,
+  );
+
+  if (typeof metadata !== "object" || metadata === null || Array.isArray(metadata)) {
+    return { thumbnailUrl: fallbackUrl, thumbnailSrcSet: fallbackVariants };
+  }
+
+  const record = metadata as Record<string, unknown>;
+  const full = record.full;
+  const fullKey =
+    typeof full === "object" && full !== null && !Array.isArray(full) &&
+    typeof (full as Record<string, unknown>).key === "string"
+      ? (full as Record<string, string>).key
+      : null;
+  const thumbnailUrl = fullKey
+    ? services.storage.getPublicObjectUrl(fullKey)
+    : fallbackUrl;
+  const variants = Array.isArray(record.variants)
+    ? record.variants.flatMap((variant): PublicThumbnailVariant[] => {
+        if (typeof variant !== "object" || variant === null || Array.isArray(variant)) {
+          return [];
+        }
+        const item = variant as Record<string, unknown>;
+        if (
+          typeof item.key !== "string" ||
+          typeof item.width !== "number" ||
+          typeof item.height !== "number"
+        ) {
+          return [];
+        }
+        const url = services.storage.getPublicObjectUrl(item.key);
+        return url ? [{ url, width: item.width, height: item.height }] : [];
+      })
+    : [];
+
+  return {
+    thumbnailUrl,
+    thumbnailSrcSet: variants.length > 0 ? variants : fallbackVariants,
+  };
+}
 import {
   createCourseDeletionService,
   type CourseDeletionService,
@@ -85,8 +164,12 @@ export function createCourseService({
   /**
    * Verifies course existence and owner permissions.
    */
-  function getCourseAndVerifyOwner(courseId: string, creatorId: string) {
-    return verifyCourseOwner(database, courseId, creatorId);
+  function getCourseAndVerifyOwner(
+    courseId: string,
+    creatorId: string,
+    userRoles?: readonly string[],
+  ) {
+    return verifyCourseOwner(database, courseId, creatorId, userRoles);
   }
 
   /**
@@ -122,9 +205,11 @@ export function createCourseService({
             salePrice: null,
           };
 
-      const thumbnailUrl = row.thumbnail_media_id
-        ? `/api/v1/media/${row.thumbnail_media_id}`
-        : null;
+      const { thumbnailUrl, thumbnailSrcSet } = resolvePublicThumbnailUrls(
+        services,
+        row.thumbnail_metadata,
+        row.thumbnail_media_id,
+      );
 
       const instructorName =
         row.instructor_alias || row.creator_display_name || null;
@@ -138,6 +223,7 @@ export function createCourseService({
           (row.difficulty as "beginner" | "intermediate" | "advanced" | null) ??
           null,
         thumbnailUrl,
+        thumbnailSrcSet,
         instructorName,
         categoryName: row.category_name ?? null,
         totalSections: Number(row.total_sections ?? 0),
@@ -293,10 +379,14 @@ export function createCourseService({
   }
 
   /**
-   * Lists all courses owned by the authenticated creator.
+   * Lists all courses for the authoring/management view.
    */
-  async function listMyCourses(creatorId: string) {
-    const rows = await courseRepo.listCoursesByCreator(database, creatorId);
+  async function listMyCourses(creatorId: string, userRoles?: readonly string[]) {
+    const isAdminOrInstructor =
+      userRoles?.includes(ADMIN_ROLE) || userRoles?.includes("instructor");
+    const rows = isAdminOrInstructor
+      ? await courseRepo.listAllCourses(database)
+      : await courseRepo.listCoursesByCreator(database, creatorId);
     const courses = rows.map((c) => {
       const lessonDuration = Number(c.lesson_duration_seconds ?? 0);
       const totalDurationSeconds =
@@ -340,9 +430,10 @@ export function createCourseService({
     creatorId: string,
     payload: UpdateCourseBasicsRequest,
     logger: FastifyBaseLogger,
+    userRoles?: readonly string[],
   ) {
     const { version, ...updates } = payload;
-    const course = await getCourseAndVerifyOwner(courseId, creatorId);
+    const course = await getCourseAndVerifyOwner(courseId, creatorId, userRoles);
 
     if (course.version !== version) {
       throw new AppError(
@@ -381,6 +472,7 @@ export function createCourseService({
       const thumb = await mediaService.getMediaAsset(
         updates.thumbnailMediaId,
         creatorId,
+        userRoles,
       );
       if (
         !thumb ||
@@ -399,6 +491,7 @@ export function createCourseService({
       const trailer = await mediaService.getMediaAsset(
         updates.trailerMediaId,
         creatorId,
+        userRoles,
       );
       if (!trailer || trailer.type !== "video") {
         throw new AppError(
@@ -441,6 +534,7 @@ export function createCourseService({
         updates.trailerMediaId,
         creatorId,
         logger,
+        userRoles,
       );
     }
 
@@ -503,8 +597,20 @@ export function createCourseService({
   /**
    * Assembles the full editor payload for authoring view.
    */
-  async function getCourseEditorData(courseId: string, creatorId: string) {
-    const course = await getCourseAndVerifyOwner(courseId, creatorId);
+  async function getCourseEditorData(
+    courseId: string,
+    creatorId: string,
+    userRoles?: readonly string[],
+  ) {
+    const isAdmin = userRoles?.includes(ADMIN_ROLE);
+    const isInstructor = userRoles?.includes("instructor");
+    const course = await courseRepo.findCourseById(database, courseId);
+    if (!course) {
+      throw new AppError(404, "COURSE_NOT_FOUND", "Course not found.");
+    }
+    if (!isAdmin && !isInstructor && course.creator_id !== creatorId) {
+      throw new AppError(403, "FORBIDDEN", "Unauthorized course access.");
+    }
 
     const [sections, lessons, accessRules, pricing, settings, includes] =
       await Promise.all([
@@ -520,7 +626,8 @@ export function createCourseService({
       await curriculumService.listResourcesForLessons(lessonIds);
     const resourceMediaAssets = await mediaService.getMediaAssets(
       Array.from(new Set(resources.map((resource) => resource.media_asset_id))),
-      creatorId,
+      course.creator_id ?? creatorId,
+      userRoles,
     );
     const resourceMediaById = new Map(
       resourceMediaAssets.map((media) => [media.id, media]),
@@ -533,7 +640,8 @@ export function createCourseService({
             .filter((id): id is string => Boolean(id)),
         ),
       ),
-      creatorId,
+      course.creator_id ?? creatorId,
+      userRoles,
     );
     const contentMediaDurations = new Map(
       contentMediaAssets
@@ -684,9 +792,15 @@ export function createCourseService({
     const isAdmin = Boolean(
       user && user.roles && user.roles.includes(ADMIN_ROLE),
     );
+    const isInstructor = Boolean(
+      user &&
+        user.roles &&
+        (user.roles.includes(INSTRUCTOR_ROLE) ||
+          user.roles.includes("creator")),
+    );
 
     if (course.status !== "published") {
-      if (!isOwner && !isAdmin) {
+      if (!isOwner && !isAdmin && !isInstructor) {
         throw new AppError(404, "COURSE_NOT_FOUND", "Course not published.");
       }
     }
@@ -702,6 +816,7 @@ export function createCourseService({
       pricing,
       settings,
       includes,
+      thumbnailAsset,
     ] = await Promise.all([
       course.creator_id ? authService.findUserById(course.creator_id) : null,
       course.category_id
@@ -713,6 +828,9 @@ export function createCourseService({
       configurationService.findPricingByCourseId(courseId),
       configurationService.findSettingsByCourseId(courseId),
       includesService.listCourseIncludes(courseId),
+      course.thumbnail_media_id
+        ? mediaService.getMediaAsset(course.thumbnail_media_id)
+        : null,
     ]);
 
     const creator = creatorUser
@@ -821,6 +939,11 @@ export function createCourseService({
         creatorId: course.creator_id,
         categoryId: course.category_id,
         thumbnailMediaId: course.thumbnail_media_id,
+        ...resolvePublicThumbnailUrls(
+          services,
+          thumbnailAsset?.metadata,
+          course.thumbnail_media_id,
+        ),
         trailerMediaId: course.trailer_media_id,
         instructorAlias: course.instructor_alias ?? null,
         version: course.version,
@@ -875,8 +998,16 @@ export function createCourseService({
   /**
    * Soft deletes a course after verifying ownership.
    */
-  async function deleteCourse(courseId: string, creatorId: string) {
-    return await deletionService.scheduleCourseDeletion(courseId, creatorId);
+  async function deleteCourse(
+    courseId: string,
+    creatorId: string,
+    userRoles?: readonly string[],
+  ) {
+    return await deletionService.scheduleCourseDeletion(
+      courseId,
+      creatorId,
+      userRoles,
+    );
   }
 
   return {

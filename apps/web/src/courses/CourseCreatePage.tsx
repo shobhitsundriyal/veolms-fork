@@ -95,6 +95,10 @@ import {
   usePublishCourse,
   useUnpublishCourse,
 } from "../services/courses";
+import {
+  getCourseThumbnailCdnUrl,
+  waitForCourseThumbnailCdnUrl,
+} from "./courseMedia";
 import { useIsMutating } from "@tanstack/react-query";
 import type {
   Category,
@@ -155,6 +159,7 @@ type ThumbnailUploadStatus =
   | "idle"
   | "uploading"
   | "confirming"
+  | "processing"
   | "saving"
   | "error";
 
@@ -198,6 +203,19 @@ export const normalizeBasicsState = (
       ? Boolean(raw.showInstructorName)
       : true,
 });
+
+function getThumbnailUploadErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "message" in error &&
+    typeof error.message === "string"
+  ) {
+    return error.message;
+  }
+  return "Thumbnail upload failed. Please try again.";
+}
 
 export const isBasicsMetaEqual = (
   a: BasicsFormState,
@@ -2708,6 +2726,7 @@ export function CourseCreatePage({
   const isThumbnailBusy =
     thumbnailUploadStatus === "uploading" ||
     thumbnailUploadStatus === "confirming" ||
+    thumbnailUploadStatus === "processing" ||
     thumbnailUploadStatus === "saving";
 
   useEffect(() => {
@@ -2817,6 +2836,13 @@ export function CourseCreatePage({
       await mediaService.confirmUpload(presigned.mediaAssetId);
 
       if (!requestIsActive()) return;
+      setThumbnailUploadStatus("processing");
+      const processedThumbnailUrl = await waitForCourseThumbnailCdnUrl(
+        presigned.mediaAssetId,
+        { signal: uploadAbortController.signal },
+      );
+
+      if (!requestIsActive()) return;
       setThumbnailUploadStatus("saving");
 
       const updated = await updateBasicsMutation.mutateAsync({
@@ -2833,7 +2859,7 @@ export function CourseCreatePage({
       courseVersionRef.current = updated.version;
       thumbnailMediaIdRef.current = presigned.mediaAssetId;
       setThumbnailMediaId(presigned.mediaAssetId);
-      setThumbnail(`/api/v1/media/${presigned.mediaAssetId}`);
+      setThumbnail(processedThumbnailUrl);
       thumbnailDirtyRef.current = false;
       setThumbnailUploadProgress(100);
       setThumbnailUploadStatus("idle");
@@ -2851,11 +2877,7 @@ export function CourseCreatePage({
 
       restorePreviousThumbnail();
       setThumbnailUploadStatus("error");
-      setThumbnailUploadError(
-        error instanceof Error
-          ? error.message
-          : "Thumbnail upload failed. Please try again.",
-      );
+      setThumbnailUploadError(getThumbnailUploadErrorMessage(error));
     } finally {
       if (
         thumbnailUploadAbortControllerRef.current === uploadAbortController
@@ -4467,11 +4489,7 @@ export function CourseCreatePage({
         }
         thumbnailMediaIdRef.current = confirmedThumbnailMediaId;
         setThumbnailMediaId(confirmedThumbnailMediaId);
-        setThumbnail(
-          confirmedThumbnailMediaId
-            ? `/api/v1/media/${confirmedThumbnailMediaId}`
-            : null,
-        );
+        setThumbnail(getCourseThumbnailCdnUrl(confirmedThumbnailMediaId) ?? null);
       }
 
       const isBasicsSavingActive =
@@ -9314,6 +9332,8 @@ export function CourseCreatePage({
                             ? `Uploading thumbnail… ${thumbnailUploadProgress}%`
                             : thumbnailUploadStatus === "confirming"
                               ? "Confirming thumbnail upload…"
+                              : thumbnailUploadStatus === "processing"
+                                ? "Processing thumbnail…"
                               : "Saving thumbnail to this course…"}
                         </p>
                       ) : null}

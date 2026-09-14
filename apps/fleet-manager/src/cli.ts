@@ -506,7 +506,8 @@ export async function runCli(
         );
       }
 
-      case "infra": {
+      case "infra":
+      case "update": {
         const infraProvider =
           resolveProviderName(cliProvider, process.env) ?? "";
 
