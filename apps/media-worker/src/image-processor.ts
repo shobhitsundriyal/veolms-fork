@@ -1,7 +1,6 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import sharp from "sharp";
 import type { Kysely } from "kysely";
 import {
   completeImageJob,
@@ -13,6 +12,19 @@ import type { MediaWorkerConfig } from "@veolms/config";
 import { RESPONSIVE_IMAGE_WIDTHS } from "./image-variants.ts";
 
 const WEBP_OPTIONS = { quality: 84, effort: 6, smartSubsample: true } as const;
+
+type Sharp = typeof import("sharp");
+let sharpModule: Sharp | undefined;
+
+async function loadSharp(): Promise<Sharp> {
+  if (!sharpModule) {
+    const imported = (await import("sharp")) as unknown as {
+      default: Sharp;
+    };
+    sharpModule = imported.default;
+  }
+  return sharpModule;
+}
 
 function resolveProcessedImagePrefix(
   storageKey: string,
@@ -64,6 +76,7 @@ export async function processImageJob(options: {
     const sourcePath = join(scratch, "original");
     const storage = storageFor(config);
     await storage.downloadObject(media.storage_key, sourcePath);
+    const sharp = await loadSharp();
     const source = sharp(sourcePath).rotate();
     const metadata = await source.metadata();
     if (!metadata.width || !metadata.height)
