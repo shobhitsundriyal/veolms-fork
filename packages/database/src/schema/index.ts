@@ -44,7 +44,11 @@ import type {
   CourseDeletionStorageItemTable,
 } from "./courses.schema.ts";
 
-import type { MediaAssetTable, VideoOutputTable } from "./media.schema.ts";
+import type {
+  ImageJobTable,
+  MediaAssetTable,
+  VideoOutputTable,
+} from "./media.schema.ts";
 
 import type {
   CourseBundleTable,
@@ -132,6 +136,7 @@ export interface Database {
 
   // Media & Video Processing
   media_assets: MediaAssetTable;
+  image_jobs: ImageJobTable;
   video_outputs: VideoOutputTable;
 
   // Commerce, Orders & Payments
