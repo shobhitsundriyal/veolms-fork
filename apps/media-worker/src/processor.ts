@@ -312,6 +312,11 @@ export async function probeVideoMetadata(
     };
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
+    if (detail.includes("moov atom not found")) {
+      throw new Error(
+        `Unable to probe input video ${videoPath}: MP4 file is corrupted, truncated, or incomplete (moov atom not found). Please verify that the file in storage is a complete, valid MP4 video. Detail: ${detail}`,
+      );
+    }
     throw new Error(`Unable to probe input video ${videoPath}: ${detail}`);
   }
 }
@@ -457,6 +462,8 @@ export async function executeTranscodeJob(
       bucket: config.S3_BUCKET,
       region: config.S3_REGION,
       endpoint: config.S3_ENDPOINT,
+      accessKeyId: config.S3_ACCESS_KEY_ID,
+      secretAccessKey: config.S3_SECRET_ACCESS_KEY,
       forcePathStyle: config.S3_FORCE_PATH_STYLE,
     });
     await mkdir(jobScratchDir, { recursive: true });
@@ -464,6 +471,7 @@ export async function executeTranscodeJob(
 
     // 3. Obtain source video (HTTP(S) URL, local file, or S3 download)
     const isHttpUrl = /^https?:\/\//i.test(job.video_key);
+    const cleanVideoKey = job.video_key.replace(/^[/\\]+/, "");
 
     if (isHttpUrl) {
       await downloadHttpFile(job.video_key, inputVideoPath, {
@@ -472,7 +480,6 @@ export async function executeTranscodeJob(
         signal,
       });
     } else {
-      const cleanVideoKey = job.video_key.replace(/^[/\\]+/, "");
       const keyWithoutBucketPrefix = cleanVideoKey.replace(
         /^s3-bucket[/\\]/,
         "",
@@ -541,6 +548,16 @@ export async function executeTranscodeJob(
         });
       }
     }
+
+    const inputStat = await stat(inputVideoPath).catch(() => null);
+    if (!inputStat || inputStat.size === 0) {
+      throw new Error(
+        `Source video "${job.video_key}" (key: "${cleanVideoKey}") is empty (0 bytes) or missing at "${inputVideoPath}". Please ensure that a valid, non-empty video file exists in storage.`,
+      );
+    }
+    console.info(
+      `[media-worker] Source video ready (${inputStat.size} bytes): ${inputVideoPath}`,
+    );
 
     // 4. Probe Video Metadata (or reuse from DB if already probed)
     const mediaAsset = await db

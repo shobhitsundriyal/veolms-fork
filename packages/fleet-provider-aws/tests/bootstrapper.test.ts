@@ -51,6 +51,18 @@ describe("EC2 UserData Bootstrapper Generator", () => {
     assert.ok(script.includes("ffmpeg"));
     assert.ok(script.includes("if ! command -v node"));
     assert.ok(script.includes("awscli"));
+    assert.ok(script.includes('if [ "${IMAGE_WORKER_MODE:-false}" = "true" ]'));
+    assert.ok(
+      script.includes(
+        "npm install --prefix /opt/veolms --no-save --no-package-lock",
+      ),
+    );
+    assert.ok(
+      script.includes(
+        '--omit=dev --include=optional --os=linux --cpu="$SHARP_CPU" sharp@0.34.5',
+      ),
+    );
+    assert.ok(script.includes("node -e 'require(\"sharp\")'"));
   });
 
   it("always installs a trap-based cleanup that uploads the log and terminates on any exit", () => {
