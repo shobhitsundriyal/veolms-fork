@@ -2,6 +2,11 @@
 
 The **Media Worker** is an ephemeral compute worker running on an EC2 instance or local process. It claims video transcoding jobs from PostgreSQL, downloads the source video from S3 or HTTP(S), encodes multi-rendition adaptive HLS streams via FFmpeg, uploads segments incrementally, and self-terminates when idle.
 
+The worker bundle keeps `sharp` external because it contains native binaries.
+Docker builds install the Linux binary for the image target architecture, and
+AWS image workers install and verify the matching `sharp@0.34.5` runtime during
+bootstrap. Video workers load `sharp` only when `IMAGE_WORKER_MODE=true`.
+
 ---
 
 ## Key Features & Lifecycle

@@ -97,7 +97,7 @@ export async function runBuildAmi(options?: BuildAmiOptions): Promise<string> {
   console.info(`
 ${bold(cyan("ℹ Why does building a Pre-baked AMI take ~3 to 5 minutes?"))}
   ${dim("•")} ${bold("1. Launch temporary builder:")} AWS launches a clean EC2 instance (${bold(instanceType)}) (~30s).
-  ${dim("•")} ${bold("2. Dependency installation:")} Updates Debian packages and installs Node.js 24, FFmpeg, and AWS CLI v2 (~1.5-2m).
+  ${dim("•")} ${bold("2. Dependency installation:")} Updates Debian packages and installs Node.js 24, FFmpeg, AWS CLI v2, and architecture-matched sharp (~1.5-2m).
   ${dim("•")} ${bold("3. Clean shutdown:")} The instance stops cleanly to sync filesystems and ensure zero EBS corruption (~15s).
   ${dim("•")} ${bold("4. EBS snapshot & AMI registration:")} AWS creates an EBS snapshot and registers the AMI (~1.5-2m).
   ${green("✔")} ${bold("One-time process:")} Every worker launched in the future will boot in ${bold("<30 seconds")}!
@@ -134,6 +134,9 @@ curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
 apt-get install -y nodejs
 
 mkdir -p /opt/veolms
+SHARP_CPU="${architecture === "arm64" ? "arm64" : "x64"}"
+npm install --prefix /opt/veolms --no-save --no-package-lock --no-audit --no-fund --omit=dev --include=optional --os=linux --cpu="$SHARP_CPU" sharp@0.34.5
+node -e 'require("/opt/veolms/node_modules/sharp")'
 echo "SUCCESS" > /opt/veolms/install_status
 sync
 shutdown -h now

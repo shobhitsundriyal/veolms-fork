@@ -45,7 +45,10 @@ const baseMediaWorkerConfigSchema = z.object({
     .int()
     .min(1)
     .default(Number.MAX_SAFE_INTEGER),
-  IMAGE_WORKER_MODE: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
+  IMAGE_WORKER_MODE: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
   IMAGE_WORKER_POLL_MS: z.coerce.number().int().min(250).default(2000),
   FLEET_TEST_MODE: z
     .enum(["true", "false"])
@@ -125,11 +128,22 @@ export function loadMediaWorkerConfig(
   const resolvedEnv = {
     ...env,
     WORKER_ID: env["WORKER_ID"] || undefined,
-    S3_BUCKET: env["S3_BUCKET"] || env["STORAGE_BUCKET"] || "veolms-media",
-    S3_ENDPOINT: env["S3_ENDPOINT"] || env["STORAGE_ENDPOINT"] || undefined,
-    S3_REGION: env["S3_REGION"] || env["STORAGE_REGION"] || env["AWS_REGION"] || "us-east-1",
-    S3_ACCESS_KEY_ID: env["S3_ACCESS_KEY_ID"] || env["STORAGE_ACCESS_KEY_ID"] || undefined,
-    S3_SECRET_ACCESS_KEY: env["S3_SECRET_ACCESS_KEY"] || env["STORAGE_SECRET_ACCESS_KEY"] || undefined,
+    // STORAGE_* is the shared API/worker configuration. Prefer it when both
+    // aliases are present so a stale generated S3_BUCKET cannot override the
+    // bucket used by the API (for example during local R2 development).
+    S3_BUCKET: env["STORAGE_BUCKET"] || env["S3_BUCKET"] || "veolms-media",
+    S3_ENDPOINT: env["STORAGE_ENDPOINT"] || env["S3_ENDPOINT"] || undefined,
+    S3_REGION:
+      env["STORAGE_REGION"] ||
+      env["S3_REGION"] ||
+      env["AWS_REGION"] ||
+      "us-east-1",
+    S3_ACCESS_KEY_ID:
+      env["STORAGE_ACCESS_KEY_ID"] || env["S3_ACCESS_KEY_ID"] || undefined,
+    S3_SECRET_ACCESS_KEY:
+      env["STORAGE_SECRET_ACCESS_KEY"] ||
+      env["S3_SECRET_ACCESS_KEY"] ||
+      undefined,
   };
   const parsed = mediaWorkerConfigSchema.parse(resolvedEnv);
   const defaults = resolveDefaultUploadConcurrency();
