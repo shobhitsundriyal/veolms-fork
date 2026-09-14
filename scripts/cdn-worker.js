@@ -22,7 +22,12 @@
 const TOKEN_QUERY_PARAMETER = "veo_token";
 const MANIFEST_PATTERN = /\.m3u8$/iu;
 const DEFAULT_CDN_URL = "/cdn";
-const DEFAULT_PUBLIC_FOLDERS = ["public", "course-hls", "course-videos"];
+const DEFAULT_PUBLIC_FOLDERS = [
+  "public",
+  "thumbnails",
+  "course-hls",
+  "course-videos",
+];
 const DEFAULT_PRIVATE_FOLDERS = ["protected", "media", "transcoded"];
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
