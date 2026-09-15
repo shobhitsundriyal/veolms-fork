@@ -102,9 +102,11 @@ All policy definitions live in [`packages/fleet-provider-aws/iam/`](../packages/
 
 To automate updates securely without exposing root or administrative AWS credentials in GitHub, create a dedicated least-privilege IAM user for GitHub Actions.
 
-Its policy also allows `lambda:InvokeFunction` for the Fleet Manager and
-metadata-probe functions, so an API configured with that user's keys can
-invoke a configured Lambda by function name.
+The resulting credentials are exclusively for GitHub Actions deployment. Do
+not configure the API, Fleet Manager runtime, Lambda, or worker containers
+with the `veolms-fleet-infra-action` keys. If an API must invoke a Lambda
+directly, give it a separate runtime role or user scoped only to
+`lambda:InvokeFunction` on the required function ARNs.
 
 ### Automated Setup Command
 
@@ -131,7 +133,7 @@ S3_BUILD_BUCKET="<your-build-bucket>" AWS_REGION="<your-region>" ./packages/flee
 
 ### Permissions Granted by the CI/CD Policy:
 
-- **S3 Build Bucket**: `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject`, `s3:DeleteObjectVersion`, `s3:HeadObject`, `s3:ListBucket` strictly scoped to `arn:aws:s3:::${S3_BUILD_BUCKET}/*`.
+- **S3 Build Bucket**: object actions are limited to `arn:aws:s3:::${S3_BUILD_BUCKET}/bundles/*`; `s3:ListBucket` is limited to the `bundles/` prefix.
 - **AWS Lambda**: `lambda:UpdateFunctionCode`, `lambda:GetFunction`, `lambda:GetFunctionConfiguration`, `lambda:PublishVersion` on `veolms-fleet-manager` and `veolms-video-metadata-probe`.
 - **CloudWatch Logs**: `logs:DescribeLogGroups`.
 - **Zero Wildcard Admin**: Cannot modify billing, IAM, VPC, or other AWS services.

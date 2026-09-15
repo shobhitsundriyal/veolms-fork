@@ -42,6 +42,7 @@ import {
   FLOCI_DEFAULT_AMI_ID,
   awsS3ClientOptions,
   awsServiceClientOptions,
+  resolveFlociContainerDatabaseUrl,
   resolveFlociEndpoint,
 } from "./floci.ts";
 
@@ -157,6 +158,12 @@ export function createAwsProvider(
   const ssm =
     config.ssmClient ?? new SSMClient(awsServiceClientOptions(region));
   const s3Endpoint = process.env.S3_ENDPOINT || flociEndpoint;
+  const s3Region = process.env.S3_REGION?.trim();
+  if (!isFloci && s3Endpoint && !s3Region) {
+    throw new Error(
+      "S3_REGION is required when S3_ENDPOINT is configured for a non-Floci S3-compatible service.",
+    );
+  }
   const s3AccessKeyId = process.env.S3_ACCESS_KEY_ID;
   const s3SecretAccessKey = process.env.S3_SECRET_ACCESS_KEY;
   const s3Credentials =
@@ -167,8 +174,8 @@ export function createAwsProvider(
     config.s3Client ??
     new S3Client({
       ...(isFloci
-        ? awsS3ClientOptions(process.env.S3_REGION || region)
-        : { region: process.env.S3_REGION || region }),
+        ? awsS3ClientOptions(s3Region || region)
+        : { region: s3Region || region }),
       ...(!isFloci && s3Endpoint
         ? {
             endpoint: s3Endpoint,
@@ -212,7 +219,10 @@ export function createAwsProvider(
       const buildBucket =
         config.s3BuildBucket ?? envConfig.S3_BUILD_BUCKET ?? bucketName;
       const workerDatabaseUrl = isFloci
-        ? process.env.FLOCI_DATABASE_URL || process.env.DATABASE_URL
+        ? resolveFlociContainerDatabaseUrl(
+            process.env.DATABASE_URL,
+            process.env.FLOCI_DATABASE_URL,
+          )
         : undefined;
       const defaultAwsEnv: Record<string, string> = {
         AWS_REGION: region,

@@ -6,8 +6,9 @@ provider can run against Floci, which emulates the AWS control plane locally
 and launches Lambda/EC2 workloads as Docker containers. Both require Docker.
 Normal development stays lightweight: `docker compose up -d` starts only
 PostgreSQL. The AWS-provider workflow starts only `compose.floci.yaml` from
-inside `pnpm run fleet:infra`; the Fleet commands read
-`apps/fleet-manager/.env` directly.
+inside `pnpm run fleet:infra`; the Fleet commands read the generated
+`apps/fleet-manager/.env` and `apps/media-worker/.env` files directly, along
+with the current process environment.
 
 ## Files and lifecycle
 
@@ -46,13 +47,14 @@ pnpm run fleet:provider # choose AWS (option 1)
 pnpm run fleet:infra # choose Floci at "Where should this provision resources?"
 ```
 
-The infra flow uses the root `.env` `DATABASE_URL`. If it is a hosted URL,
-the same URL is passed to Floci Lambda/EC2 containers and no PostgreSQL
-container is started.
+The Floci Compose flow uses the root `.env` for Docker Compose interpolation,
+including `DATABASE_URL`. If that URL is hosted, the same URL is passed to
+Floci Lambda/EC2 containers and no PostgreSQL container is started.
 
-The wizard writes `FLOCI_ENDPOINT`/`AWS_ENDPOINT_URL` for host-side calls and
-uses `test` credentials. Floci's Compose hostname is `floci`, so spawned
-Lambda and EC2 containers receive a reachable `http://floci:4566` endpoint.
+The wizard writes `FLOCI_ENDPOINT`/`AWS_ENDPOINT_URL` to the generated app env
+files for host-side calls and uses `test` credentials. Floci's Compose
+hostname is `floci`, so spawned Lambda and EC2 containers receive a reachable
+`http://floci:4566` endpoint.
 The wizard creates the AWS-shaped IAM, S3, Lambda, EC2 security-group,
 EventBridge Scheduler, and CloudWatch Logs resources inside Floci only; it
 does not use an AWS profile or make cloud calls. Use `--target=aws` when you

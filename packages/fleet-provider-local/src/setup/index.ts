@@ -67,7 +67,9 @@ export async function configureEnv(
   options: ProviderConfigOptions & { rl?: readline.Interface } = {},
 ): Promise<ProviderConfigResult> {
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
-  const repoRoot = path.resolve(__dirname, "..", "..", "..", "..");
+  const repoRoot = options.cwd
+    ? path.resolve(options.cwd)
+    : path.resolve(__dirname, "..", "..", "..", "..");
   const nonInteractive = checkNonInteractive(options);
   const shouldCloseRl =
     !isReadlineInterface(options.rl) && !nonInteractive && process.stdin.isTTY;
@@ -164,6 +166,7 @@ ${bold(cyan("╚═════════════════════�
         ...rootEnv,
         ...existingWorkerEnv,
         ...existingFleetEnv,
+        ...options.env,
       },
       nonInteractive,
     });

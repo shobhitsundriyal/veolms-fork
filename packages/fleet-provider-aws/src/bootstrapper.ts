@@ -8,6 +8,15 @@ export interface BootstrapperOptions {
   extraEnv?: Readonly<Record<string, string>>;
 }
 
+// Keep the real-AWS bootstrap independent of a moving "latest" archive and
+// of publisher-supplied checksums. These are the SHA-256 digests of the
+// versioned John Van Sickle release archives used below.
+export const PINNED_FFMPEG_VERSION = "6.0.1";
+export const PINNED_FFMPEG_SHA256 = {
+  amd64: "28268bf402f1083833ea269331587f60a242848880073be8016501d864bd07a5",
+  arm64: "7dbd8e2f47bd83de591b9d6ea70e67d32d9aa97e7d47ae402b60c2fe3fd4d0ab",
+} as const;
+
 export const DEFAULT_BOOTSTRAP_SCRIPT = `#!/bin/bash
 set -uo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -220,21 +229,23 @@ install_static_ffmpeg() {
       ;;
   esac
 
-  local ffmpeg_url="https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-\$ffmpeg_arch-static.tar.xz"
+  local ffmpeg_version="${PINNED_FFMPEG_VERSION}"
+  local ffmpeg_url="https://johnvansickle.com/ffmpeg/old-releases/ffmpeg-\${ffmpeg_version}-\${ffmpeg_arch}-static.tar.xz"
   local ffmpeg_archive="/tmp/ffmpeg-static.tar.xz"
-  local ffmpeg_checksum="/tmp/ffmpeg-static.tar.xz.md5"
   local ffmpeg_extract_dir="/tmp/ffmpeg-static"
 
   echo "[bootstrapper] Installing static FFmpeg for \$ffmpeg_arch..."
   curl -fL --retry 3 --retry-delay 2 "\$ffmpeg_url" -o "\$ffmpeg_archive"
-  curl -fL --retry 3 --retry-delay 2 "\$ffmpeg_url.md5" -o "\$ffmpeg_checksum"
 
   local expected_checksum=""
   local actual_checksum=""
-  expected_checksum=\$(awk '{print \$1}' "\$ffmpeg_checksum")
-  actual_checksum=\$(md5sum "\$ffmpeg_archive" | awk '{print \$1}')
+  case "\$ffmpeg_arch" in
+    amd64) expected_checksum="${PINNED_FFMPEG_SHA256.amd64}" ;;
+    arm64) expected_checksum="${PINNED_FFMPEG_SHA256.arm64}" ;;
+  esac
+  actual_checksum=\$(sha256sum "\$ffmpeg_archive" | awk '{print \$1}')
   if [ -z "\$expected_checksum" ] || [ "\$expected_checksum" != "\$actual_checksum" ]; then
-    echo "[bootstrapper] Static FFmpeg checksum verification failed."
+    echo "[bootstrapper] Static FFmpeg SHA-256 verification failed."
     return 1
   fi
 
@@ -253,7 +264,7 @@ install_static_ffmpeg() {
 
   install -m 0755 "\$ffmpeg_binary" /usr/local/bin/ffmpeg
   install -m 0755 "\$ffprobe_binary" /usr/local/bin/ffprobe
-  rm -rf "\$ffmpeg_extract_dir" "\$ffmpeg_archive" "\$ffmpeg_checksum"
+  rm -rf "\$ffmpeg_extract_dir" "\$ffmpeg_archive"
 }
 
 mkdir -p /opt/veolms

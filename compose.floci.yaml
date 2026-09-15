@@ -4,7 +4,9 @@
 # taken from the hosted root .env configuration.
 services:
   floci:
-    image: ${FLOCI_IMAGE:-floci/floci:latest}
+    # Keep the reviewed default immutable. FLOCI_IMAGE remains an explicit
+    # escape hatch for local testing of another image.
+    image: ${FLOCI_IMAGE:-floci/floci:1.5.25@sha256:6d18f478f96db59031865a1c19f3d1756c1fbd1c93e8f79b14b7c38e9c4fc38c}
     user: root
     ports:
       - "${FLOCI_PORT:-4566}:4566"

@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as setupModule from "../src/setup/index.ts";
 import * as destroyModule from "../src/setup/destroy.ts";
+import { buildCicdPolicyDocument } from "../iam/setup-cicd-iam.ts";
 
 describe("AWS Setup Module Interface", () => {
   it("should export runAwsInfraSetup function", () => {
@@ -241,6 +242,33 @@ describe("AWS Setup Module Interface", () => {
     assert.ok(s3Statement.Action.includes("s3:DeleteObjectVersion"));
   });
 
+  it("should generate the CI/CD policy with bundle-scoped S3 permissions", () => {
+    const policy = JSON.parse(
+      buildCicdPolicyDocument({
+        bucketName: "build-bucket",
+        region: "ap-south-1",
+        accountId: "123456789012",
+      }),
+    );
+    const objectStatement = policy.Statement.find(
+      (s: { Sid: string }) => s.Sid === "S3BuildBucketUploadAndRead",
+    );
+    const listStatement = policy.Statement.find(
+      (s: { Sid: string }) => s.Sid === "S3BuildBucketListBundles",
+    );
+
+    assert.equal(
+      objectStatement.Resource,
+      "arn:aws:s3:::build-bucket/bundles/*",
+    );
+    assert.ok(!objectStatement.Action.includes("s3:HeadObject"));
+    assert.ok(!objectStatement.Action.includes("s3:ListBucket"));
+    assert.equal(listStatement.Resource, "arn:aws:s3:::build-bucket");
+    assert.deepEqual(listStatement.Condition, {
+      StringLike: { "s3:prefix": ["bundles/", "bundles/*"] },
+    });
+  });
+
   it("should allow the CI/CD IAM user to invoke the fleet Lambda functions", () => {
     const policyPath = path.join(
       import.meta.dirname,
@@ -437,7 +465,53 @@ describe("AWS Setup Module Interface", () => {
     const fleetEnvDir = path.join(tempDir, "apps", "fleet-manager");
     fs.mkdirSync(fleetEnvDir, { recursive: true });
 
+    const envKeys = [
+      "STORAGE_PROVIDER",
+      "STORAGE_BUCKET",
+      "S3_BUCKET",
+      "S3_BUILD_BUCKET",
+      "S3_ENDPOINT",
+      "S3_REGION",
+      "S3_ACCESS_KEY_ID",
+      "S3_SECRET_ACCESS_KEY",
+      "S3_FORCE_PATH_STYLE",
+      "S3_USE_INSTANCE_ROLE",
+      "FLOCI_ENDPOINT",
+      "AWS_ENDPOINT_URL",
+      "AWS_REGION",
+      "AWS_PROFILE",
+      "AWS_ACCESS_KEY_ID",
+      "AWS_SECRET_ACCESS_KEY",
+      "DATABASE_URL",
+      "FLOCI_DATABASE_URL",
+      "FLEET_MODE",
+      "EC2_ALLOWED_INSTANCE_TYPES",
+      "EC2_BOOT_MODE",
+      "AMI_ID",
+      "AMI_NAME",
+      "MAX_WORKERS",
+      "WORKER_IDLE_POLL_SECONDS",
+      "EC2_USE_SPOT",
+      "ALLOW_SSH",
+      "EC2_KEY_NAME",
+      "KEY_NAME",
+      "SECURITY_GROUP_IDS",
+      "EC2_SECURITY_GROUP_IDS",
+      "EC2_SECURITY_GROUP_ID",
+      "LAMBDA_ARCHITECTURE",
+      "SETUP_PROBE_LAMBDA",
+      "LAMBDA_FUNCTION_ARN",
+      "PROBE_LAMBDA_ARN",
+      "PROBE_LAMBDA_NAME",
+    ];
+    const originalEnv = new Map(
+      envKeys.map((key) => [key, process.env[key]] as const),
+    );
+
     try {
+      for (const key of envKeys) {
+        delete process.env[key];
+      }
       fs.writeFileSync(
         path.join(fleetEnvDir, ".env"),
         "STORAGE_PROVIDER=s3\nS3_BUCKET=r2-media\nS3_ENDPOINT=https://r2.cloudflarestorage.com\nS3_ACCESS_KEY_ID=key123\nS3_SECRET_ACCESS_KEY=sec456\nS3_FORCE_PATH_STYLE=true\n",
@@ -451,6 +525,10 @@ describe("AWS Setup Module Interface", () => {
       assert.equal(config.s3SecretAccessKey, "sec456");
       assert.equal(config.s3ForcePathStyle, "true");
     } finally {
+      for (const [key, value] of originalEnv) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });

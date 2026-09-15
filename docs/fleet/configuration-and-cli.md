@@ -57,7 +57,12 @@ registers `s3://<bucket>/raw/*.mp4` as an S3 ObjectCreated notification for
 the probe Lambda. The probe extracts metadata and invokes the Fleet Manager
 Lambda by its configured function name. API-managed uploads still dispatch
 after upload confirmation so their canonical media/output paths are retained.
-For local Floci, set `AWS_ENDPOINT_URL` in the project-root `.env`.
+For local Floci, run `pnpm fleet:infra` and keep the generated host-side
+`FLOCI_ENDPOINT`/`AWS_ENDPOINT_URL` values in `apps/fleet-manager/.env` and
+`apps/media-worker/.env`. The Fleet CLI reads those app env files and
+`process.env`; the project-root `.env` is used for Compose interpolation. Floci
+injects its internal service hostname into Lambda and EC2 containers, so a
+host URL such as `http://localhost:4566` is not copied into their environment.
 
 ---
 

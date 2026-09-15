@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import {
   encodeUserDataBase64,
   generateUserDataScript,
+  PINNED_FFMPEG_SHA256,
+  PINNED_FFMPEG_VERSION,
 } from "../src/bootstrapper.ts";
 
 describe("EC2 UserData Bootstrapper Generator", () => {
@@ -35,9 +37,15 @@ describe("EC2 UserData Bootstrapper Generator", () => {
     assert.ok(script.includes("install_static_ffmpeg"));
     assert.ok(
       script.includes(
-        "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-$ffmpeg_arch-static.tar.xz",
+        "https://johnvansickle.com/ffmpeg/old-releases/ffmpeg-${ffmpeg_version}-${ffmpeg_arch}-static.tar.xz",
       ),
     );
+    assert.ok(
+      script.includes(`local ffmpeg_version="${PINNED_FFMPEG_VERSION}"`),
+    );
+    assert.ok(script.includes("sha256sum"));
+    assert.ok(script.includes(PINNED_FFMPEG_SHA256.arm64));
+    assert.ok(!script.includes(".md5"));
   });
   it("should generate a bootstrapper script with environment variables and install-if-missing checks", () => {
     const script = generateUserDataScript({

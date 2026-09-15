@@ -7,15 +7,21 @@
       "Action": [
         "s3:PutObject",
         "s3:GetObject",
-        "s3:HeadObject",
-        "s3:ListBucket",
         "s3:DeleteObject",
         "s3:DeleteObjectVersion"
       ],
-      "Resource": [
-        "arn:aws:s3:::${S3_BUILD_BUCKET}",
-        "arn:aws:s3:::${S3_BUILD_BUCKET}/*"
-      ]
+      "Resource": "arn:aws:s3:::${S3_BUILD_BUCKET}/bundles/*"
+    },
+    {
+      "Sid": "S3BuildBucketListBundles",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket"],
+      "Resource": "arn:aws:s3:::${S3_BUILD_BUCKET}",
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": ["bundles/", "bundles/*"]
+        }
+      }
     },
     {
       "Sid": "LambdaFunctionCodeUpdate",

@@ -147,9 +147,39 @@ describe("Docker Fleet Provider", () => {
     }
   });
 
+  it("verifies S3-backed job output through the configured storage adapter", async () => {
+    const requestedKeys: string[] = [];
+    const provider = createDockerProvider({
+      storageVerifier: {
+        headObject: async (key) => {
+          requestedKeys.push(key);
+          return key === "output/job-2/master.m3u8"
+            ? { contentLength: 128 }
+            : null;
+        },
+      },
+    });
+
+    assert.equal(await provider.verifyJobOutput!("output/job-2/"), true);
+    assert.equal(await provider.verifyJobOutput!("output/missing/"), false);
+    assert.deepEqual(requestedKeys, [
+      "output/job-2/master.m3u8",
+      "output/missing/master.m3u8",
+    ]);
+  });
+
   it("executes configureEnv in non-interactive mode", async () => {
-    const result = await configureEnv({ nonInteractive: true });
-    assert.equal(result.provider, "docker");
-    assert.ok(result.envFiles.length >= 2);
+    const testDir = join(tmpdir(), `veolms-docker-env-${randomUUID()}`);
+    try {
+      const result = await configureEnv({
+        cwd: testDir,
+        nonInteractive: true,
+      });
+      assert.equal(result.provider, "docker");
+      assert.ok(result.envFiles.length >= 2);
+      assert.ok(result.envFiles.every((file) => file.startsWith(testDir)));
+    } finally {
+      await rm(testDir, { recursive: true, force: true });
+    }
   });
 });

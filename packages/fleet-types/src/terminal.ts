@@ -147,6 +147,28 @@ export async function ask(
 }
 
 /**
+ * Prompts for a secret without ever including its default or entered value in
+ * the prompt, hint, or non-interactive log output.
+ */
+export async function askSecret(
+  rl: ReadlineInterface | undefined,
+  question: string,
+  defaultVal?: string,
+  nonInteractive?: boolean,
+): Promise<string> {
+  const isNonInter = nonInteractive ?? (!rl || isNonInteractive());
+  if (isNonInter || !rl) {
+    const status = defaultVal ? green("[configured]") : "";
+    console.log(`  ${bold("?")} ${question}: ${status}`);
+    return defaultVal ?? "";
+  }
+
+  const answer = await rl.question(`  ${bold("?")} ${question}: `);
+  const trimmed = answer.replace(/\r$/, "").trim();
+  return trimmed === "" && defaultVal !== undefined ? defaultVal : trimmed;
+}
+
+/**
  * Prompts user to select from a numbered list of choices, with default selection
  * and cross-platform line-ending handling.
  */

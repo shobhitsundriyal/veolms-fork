@@ -6,18 +6,27 @@ This directory contains the complete set of IAM policies and automation scripts 
 
 ## Policy Inventory
 
-| Policy File                            | Intended Target                                         | Purpose                                                                                           | Scope                                                                                                                 |
-| -------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| **`cicd-infra-deployer-policy.json`**  | IAM User / GitHub Actions (`veolms-fleet-infra-action`) | Used by GitHub Actions to update Lambda function code, invoke the fleet/probe functions, and upload bundles to the S3 build bucket.  | Least-privilege: S3 build bucket (`bundles/*`) & the two `veolms-*` Lambdas only.                                             |
-| **`infra-provisioner-policy.json`**    | IAM User / Admin / Provisioning Role                    | Used by the engineer or pipeline running `pnpm fleet:infra` to create all resources from scratch. | Creates S3 buckets, IAM roles/instance profiles, Lambdas, CloudWatch log groups, and EventBridge schedules.           |
-| **`worker-runtime-trust-policy.json`** | Trust Relationship on `VeoLMSWorkerRole`                | Allows AWS services to assume the worker runtime role.                                            | Trusted Services: `ec2.amazonaws.com`, `lambda.amazonaws.com`, `scheduler.amazonaws.com`.                             |
-| **`worker-runtime-policy.json`**       | Permissions Policy attached to `VeoLMSWorkerRole`       | Permissions used by EC2 transcode workers and Fleet Manager Lambdas during job processing.        | Reads/writes video segments in S3, manages EC2 spot worker lifecycle, reports CloudWatch logs, and schedules wakeups. |
+| Policy File                            | Intended Target                                         | Purpose                                                                                                                       | Scope                                                                                                                                                              |
+| -------------------------------------- | ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **`cicd-infra-deployer-policy.json`**  | IAM User / GitHub Actions (`veolms-fleet-infra-action`) | Used only by GitHub Actions to update Lambda function code, run deployment checks, and upload bundles to the S3 build bucket. | Least-privilege: S3 build bucket (`bundles/*`) & the two `veolms-*` Lambdas only.                                                                                  |
+| **`infra-provisioner-policy.json`**    | IAM User / Admin / Provisioning Role                    | Used by the engineer or pipeline running `pnpm fleet:infra` to create all resources from scratch.                             | Creates S3 buckets, IAM roles/instance profiles, Lambdas, CloudWatch log groups, and EventBridge schedules; notifications are scoped to the rendered media bucket. |
+| **`worker-runtime-trust-policy.json`** | Trust Relationship on `VeoLMSWorkerRole`                | Allows AWS services to assume the worker runtime role.                                                                        | Trusted Services: `ec2.amazonaws.com`, `lambda.amazonaws.com`, `scheduler.amazonaws.com`.                                                                          |
+| **`worker-runtime-policy.json`**       | Permissions Policy attached to `VeoLMSWorkerRole`       | Permissions used by EC2 transcode workers and Fleet Manager Lambdas during job processing.                                    | Reads/writes video segments in S3, manages EC2 spot worker lifecycle, reports CloudWatch logs, and schedules wakeups.                                              |
 
 ---
 
 ## 1. Infrastructure Provisioning Policy (`infra-provisioner-policy.json`)
 
-If you want to create an IAM User or Role specifically to run the setup tool `pnpm fleet:infra`, attach [`infra-provisioner-policy.json`](./infra-provisioner-policy.json).
+If you want to create an IAM User or Role specifically to run the setup tool `pnpm fleet:infra`, render and attach [`infra-provisioner-policy.json`](./infra-provisioner-policy.json).
+
+The policy is a template: replace `${S3_BUCKET}` with the configured media
+bucket ARN before attaching it. The `S3MediaBucketNotificationManagement`
+statement is intentionally limited to that bucket; remove any optional build
+bucket notification statement if the build bucket is not used for
+notifications. The `CreateBucket` and account-wide inspection permissions
+remain broad because the provisioning flow must discover or create
+user-selected buckets; use a separately rendered policy for a production
+account with fixed bucket names.
 
 ### Resources Managed:
 
@@ -71,7 +80,12 @@ The setup wizard automatically creates this role and its instance profile (`VeoL
 
 ## 3. CI/CD Deployer User (`veolms-fleet-infra-action`)
 
-Used exclusively by GitHub Actions to deploy code updates safely without broad administrative rights.
+Used exclusively by GitHub Actions to deploy code updates safely without broad administrative rights. Never reuse this user's keys for API or runtime Lambda invocation.
+
+If an API needs to invoke the Fleet Manager or metadata-probe Lambda directly,
+create a separate runtime role or user with only `lambda:InvokeFunction` on
+the required function ARNs. The CI/CD user's invoke permission is for the
+deployment workflow and smoke checks, not for application runtime access.
 
 ### Automated Provisioning Script:
 

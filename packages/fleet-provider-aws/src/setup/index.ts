@@ -3139,32 +3139,33 @@ You can change them if needed.
     if (shouldSetupProbeLambda) {
       info("Checking Docker status for building ffprobe Lambda layer...");
       if (!isDockerRunning()) {
-        warn(
-          "Docker is not running or not installed. Please check that Docker is running to build and publish the ffprobe layer.",
+        throw new Error(
+          "Docker is required to build the ffprobe Lambda layer before deploying the probe Lambda.",
         );
-      } else {
-        try {
-          info(
-            `Building ffprobe layer for architecture ${bold(lambdaArch)} using Docker...`,
-          );
-          const zipPath = buildFfprobeLayer({
-            architecture: lambdaArch,
-            log: true,
-          });
+      }
+      try {
+        info(
+          `Building ffprobe layer for architecture ${bold(lambdaArch)} using Docker...`,
+        );
+        const zipPath = buildFfprobeLayer({
+          architecture: lambdaArch,
+          log: true,
+        });
 
-          info("Publishing veolms-ffprobe layer to AWS Lambda...");
-          ffprobeLayerArn = await publishFfprobeLayer({
-            lambdaClient: lambda,
-            zipPath,
-            architecture: lambdaArch,
-            layerName: "veolms-ffprobe",
-          });
-          ok(`Published layer: ${bold(ffprobeLayerArn)}`);
-        } catch (layerErr: unknown) {
-          const msg =
-            layerErr instanceof Error ? layerErr.message : String(layerErr);
-          warn(`Could not build/publish ffprobe layer: ${msg}`);
-        }
+        info("Publishing veolms-ffprobe layer to AWS Lambda...");
+        ffprobeLayerArn = await publishFfprobeLayer({
+          lambdaClient: lambda,
+          zipPath,
+          architecture: lambdaArch,
+          layerName: "veolms-ffprobe",
+        });
+        ok(`Published layer: ${bold(ffprobeLayerArn)}`);
+      } catch (layerErr: unknown) {
+        const msg =
+          layerErr instanceof Error ? layerErr.message : String(layerErr);
+        throw new Error(`Could not build/publish ffprobe layer: ${msg}`, {
+          cause: layerErr,
+        });
       }
 
       info("Setting up CloudWatch log group for Probe Lambda...");
@@ -3217,7 +3218,12 @@ You can change them if needed.
     }
   }
 
-  if (storageProvider === "s3" && s3BucketName && probeLambdaArn) {
+  if (
+    storageProvider === "s3" &&
+    s3BucketName &&
+    probeLambdaArn &&
+    (s3CredentialMode === "automatic" || targetEnv === "floci")
+  ) {
     info("Connecting raw MP4 S3 uploads to the metadata probe Lambda...");
     await ensureRawVideoS3Trigger({
       accountId,
@@ -3625,20 +3631,27 @@ ${bold("Next Steps:")}
     if (s3BucketName) {
       lambdaEnvVars["S3_BUCKET"] = s3BucketName;
     }
-    if (s3Endpoint) {
-      lambdaEnvVars["S3_ENDPOINT"] = s3Endpoint;
-    }
-    if (s3Region) {
-      lambdaEnvVars["S3_REGION"] = s3Region;
-    }
-    if (s3AccessKeyId) {
-      lambdaEnvVars["S3_ACCESS_KEY_ID"] = s3AccessKeyId;
-    }
-    if (s3SecretAccessKey) {
-      lambdaEnvVars["S3_SECRET_ACCESS_KEY"] = s3SecretAccessKey;
-    }
-    if (s3ForcePathStyle) {
-      lambdaEnvVars["S3_FORCE_PATH_STYLE"] = s3ForcePathStyle;
+    if (targetEnv === "floci") {
+      // Floci injects its internal service URL into Lambda containers. A host
+      // URL such as http://localhost:4566 would point back at the Lambda
+      // container, so keep host-side endpoint and credentials out of it.
+      lambdaEnvVars["S3_FORCE_PATH_STYLE"] = "true";
+    } else {
+      if (s3Endpoint) {
+        lambdaEnvVars["S3_ENDPOINT"] = s3Endpoint;
+      }
+      if (s3Region) {
+        lambdaEnvVars["S3_REGION"] = s3Region;
+      }
+      if (s3AccessKeyId) {
+        lambdaEnvVars["S3_ACCESS_KEY_ID"] = s3AccessKeyId;
+      }
+      if (s3SecretAccessKey) {
+        lambdaEnvVars["S3_SECRET_ACCESS_KEY"] = s3SecretAccessKey;
+      }
+      if (s3ForcePathStyle) {
+        lambdaEnvVars["S3_FORCE_PATH_STYLE"] = s3ForcePathStyle;
+      }
     }
     if (s3BuildBucket) {
       lambdaEnvVars["S3_BUILD_BUCKET"] = s3BuildBucket;
@@ -3668,32 +3681,33 @@ ${bold("Next Steps:")}
     if (shouldSetupProbeLambda) {
       info("Checking Docker status for building ffprobe Lambda layer...");
       if (!isDockerRunning()) {
-        warn(
-          "Docker is not running or not installed. Please check that Docker is running to build and publish the ffprobe layer.",
+        throw new Error(
+          "Docker is required to build the ffprobe Lambda layer before deploying the probe Lambda.",
         );
-      } else {
-        try {
-          info(
-            `Building ffprobe layer for architecture ${bold(lambdaArch)} using Docker...`,
-          );
-          const zipPath = buildFfprobeLayer({
-            architecture: lambdaArch,
-            log: true,
-          });
-          const lambdaClient = createLambdaClient(region);
-          info("Publishing veolms-ffprobe layer to AWS Lambda...");
-          ffprobeLayerArn = await publishFfprobeLayer({
-            lambdaClient,
-            zipPath,
-            architecture: lambdaArch,
-            layerName: "veolms-ffprobe",
-          });
-          ok(`Published layer: ${bold(ffprobeLayerArn)}`);
-        } catch (layerErr: unknown) {
-          const msg =
-            layerErr instanceof Error ? layerErr.message : String(layerErr);
-          warn(`Could not build/publish ffprobe layer: ${msg}`);
-        }
+      }
+      try {
+        info(
+          `Building ffprobe layer for architecture ${bold(lambdaArch)} using Docker...`,
+        );
+        const zipPath = buildFfprobeLayer({
+          architecture: lambdaArch,
+          log: true,
+        });
+        const lambdaClient = createLambdaClient(region);
+        info("Publishing veolms-ffprobe layer to AWS Lambda...");
+        ffprobeLayerArn = await publishFfprobeLayer({
+          lambdaClient,
+          zipPath,
+          architecture: lambdaArch,
+          layerName: "veolms-ffprobe",
+        });
+        ok(`Published layer: ${bold(ffprobeLayerArn)}`);
+      } catch (layerErr: unknown) {
+        const msg =
+          layerErr instanceof Error ? layerErr.message : String(layerErr);
+        throw new Error(`Could not build/publish ffprobe layer: ${msg}`, {
+          cause: layerErr,
+        });
       }
 
       info("Ensuring CloudWatch log group for Probe Lambda...");
@@ -3743,7 +3757,12 @@ ${bold("Next Steps:")}
     }
   }
 
-  if (storageProvider === "s3" && s3BucketName && probeLambdaArn) {
+  if (
+    storageProvider === "s3" &&
+    s3BucketName &&
+    probeLambdaArn &&
+    (s3CredentialMode === "automatic" || targetEnv === "floci")
+  ) {
     info("Connecting raw MP4 S3 uploads to the metadata probe Lambda...");
     await ensureRawVideoS3Trigger({
       accountId,

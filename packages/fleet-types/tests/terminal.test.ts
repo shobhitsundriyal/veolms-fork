@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   ask,
   askChoice,
+  askSecret,
   banner,
   bold,
   cyan,
@@ -72,6 +73,28 @@ describe("Terminal & Readline Helpers", () => {
 
     const res = await ask(mockRl, "Enter value", "fallback", false);
     assert.equal(res, "fallback");
+  });
+
+  it("askSecret: preserves defaults without exposing them in output", async () => {
+    const output: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => output.push(args.join(" "));
+    try {
+      const res = await askSecret(undefined, "S3 secret", "do-not-log", true);
+      assert.equal(res, "do-not-log");
+      assert.ok(output.every((line) => !line.includes("do-not-log")));
+      assert.ok(output.some((line) => line.includes("[configured]")));
+    } finally {
+      console.log = originalLog;
+    }
+
+    const mockRl = {
+      question: async () => "entered-secret\r\n",
+    } as any;
+    assert.equal(
+      await askSecret(mockRl, "S3 secret", "fallback", false),
+      "entered-secret",
+    );
   });
 
   it("askChoice: selects default in non-interactive mode or without rl", async () => {

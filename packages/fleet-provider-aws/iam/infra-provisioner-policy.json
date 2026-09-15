@@ -13,18 +13,21 @@
         "s3:GetBucketPolicy",
         "s3:PutBucketCors",
         "s3:GetBucketCors",
-        "s3:GetBucketNotification",
-        "s3:PutBucketNotification",
         "s3:PutBucketPublicAccessBlock",
         "s3:GetBucketPublicAccessBlock",
         "s3:PutPublicAccessBlock",
         "s3:GetPublicAccessBlock",
         "s3:PutObject",
         "s3:GetObject",
-        "s3:HeadObject",
         "s3:DeleteObject"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "S3MediaBucketNotificationManagement",
+      "Effect": "Allow",
+      "Action": ["s3:GetBucketNotification", "s3:PutBucketNotification"],
+      "Resource": "arn:aws:s3:::${S3_BUCKET}"
     },
     {
       "Sid": "IAMRoleAndInstanceProfileManagement",

@@ -2,6 +2,7 @@ import type { Interface as ReadlineInterface } from "node:readline/promises";
 import {
   ask,
   askChoice,
+  askSecret,
   bold,
   cyan,
   dim,
@@ -150,7 +151,7 @@ export async function promptStorageConfig(
     existingEnv["S3_SECRET_ACCESS_KEY"] ||
     existingEnv["AWS_SECRET_ACCESS_KEY"] ||
     "";
-  const s3SecretAccessKey = await ask(
+  const s3SecretAccessKey = await askSecret(
     rl,
     "S3 Secret Access Key (S3_SECRET_ACCESS_KEY)",
     defaultSecretKey,
