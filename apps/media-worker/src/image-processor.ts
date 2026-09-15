@@ -26,17 +26,15 @@ async function loadSharp(): Promise<Sharp> {
   return sharpModule;
 }
 
-function resolveProcessedImagePrefix(
+export function resolveImageThumbnailPrefix(
   storageKey: string,
   mediaId: string,
 ): string {
   const normalizedKey = storageKey.replace(/^\/+/, "");
-  const visibilityPrefix = normalizedKey.startsWith("public/")
-    ? "public/"
-    : normalizedKey.startsWith("protected/")
-      ? "protected/"
-      : "";
-  return `${visibilityPrefix}thumbnails/${mediaId}/processed`;
+  const visibilityPrefix = normalizedKey.startsWith("protected/")
+    ? "protected/"
+    : "public/";
+  return `${visibilityPrefix}thumbnails/${mediaId}`;
 }
 
 function storageFor(config: MediaWorkerConfig): S3StorageService {
@@ -81,7 +79,7 @@ export async function processImageJob(options: {
     const metadata = await source.metadata();
     if (!metadata.width || !metadata.height)
       throw new Error("Image dimensions are unavailable");
-    const processedPrefix = resolveProcessedImagePrefix(
+    const thumbnailPrefix = resolveImageThumbnailPrefix(
       media.storage_key,
       mediaId,
     );
@@ -94,7 +92,7 @@ export async function processImageJob(options: {
       sizeBytes: Number(media.size_bytes),
     };
     const fullBuffer = await source.clone().webp(WEBP_OPTIONS).toBuffer();
-    const fullKey = `${processedPrefix}/full.webp`;
+    const fullKey = `${thumbnailPrefix}/full.webp`;
     await storage.putObject(
       fullKey,
       fullBuffer,
@@ -121,7 +119,7 @@ export async function processImageJob(options: {
         .webp(WEBP_OPTIONS)
         .toBuffer();
       const info = await sharp(buffer).metadata();
-      const key = `${processedPrefix}/${width}.webp`;
+      const key = `${thumbnailPrefix}/${width}.webp`;
       await storage.putObject(key, buffer, "image/webp", buffer.byteLength);
       variants.push({
         width: info.width ?? width,
