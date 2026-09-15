@@ -20,6 +20,25 @@ describe("packages/config", () => {
       assert.equal(config.API_PORT, 4000);
       assert.equal(config.NODE_ENV, "development");
       assert.equal(config.EMAIL_TRANSPORT, "console");
+      assert.equal(config.RP_ID, "localhost");
+      assert.ok(config.WEBAUTHN_ORIGINS.includes("http://localhost:3000"));
+      assert.ok(config.WEBAUTHN_ORIGINS.includes("http://127.0.0.1:3000"));
+      assert.ok(config.WEBAUTHN_RP_IDS.includes("localhost"));
+    });
+
+    it("should resolve WebAuthn origins and RP ID from custom WEB_URL and WEBAUTHN_ORIGINS", () => {
+      const config = loadServerConfig({
+        SESSION_SECRET: "12345678901234567890123456789012",
+        MFA_ENCRYPTION_KEY: "12345678901234567890123456789012",
+        SETUP_TOKEN: "custom_setup_token",
+        WEB_URL: "https://dev.veolms.org",
+        WEBAUTHN_ORIGINS: "https://app.veolms.org,https://dev.veolms.org",
+      });
+      assert.equal(config.RP_ID, "dev.veolms.org");
+      assert.ok(config.WEBAUTHN_ORIGINS.includes("https://dev.veolms.org"));
+      assert.ok(config.WEBAUTHN_ORIGINS.includes("https://app.veolms.org"));
+      assert.ok(config.WEBAUTHN_RP_IDS.includes("dev.veolms.org"));
+      assert.ok(config.WEBAUTHN_RP_IDS.includes("app.veolms.org"));
     });
 
     it("should load web configuration", () => {
