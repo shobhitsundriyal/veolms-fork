@@ -73,8 +73,9 @@ jobs:
             WORKER=false
             LAMBDA=false
 
-            # Check if media worker or underlying transcode dependencies changed
-            if echo "$DIFF" | grep -qE '^(apps/media-worker/|packages/fleet-types/|packages/config/|packages/database/)'; then
+            # Check if the worker, its runtime packaging/bootstrapper, or
+            # underlying transcode dependencies changed.
+            if echo "$DIFF" | grep -qE '^(apps/media-worker/|packages/fleet-provider-aws/|packages/fleet-types/|packages/config/|packages/database/)'; then
               WORKER=true
             fi
 

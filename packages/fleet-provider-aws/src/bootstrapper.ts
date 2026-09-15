@@ -107,6 +107,32 @@ fi
 echo "[bootstrapper] Downloading worker bundle from s3://\$BUILD_BUCKET/bundles/media-worker.js..."
 aws s3 cp "s3://\$BUILD_BUCKET/bundles/media-worker.js" /opt/veolms/worker.js --region "\${AWS_REGION:-us-east-2}"
 
+if [ "\${IMAGE_WORKER_MODE:-false}" = "true" ]; then
+  # sharp is a native dependency and the worker bundle leaves it external.
+  # Install the binary for the architecture of this EC2 instance so both
+  # fresh Debian boots and older pre-baked AMIs can run image jobs safely.
+  SHARP_CPU=""
+  case "\$(uname -m)" in
+    aarch64|arm64) SHARP_CPU="arm64" ;;
+    x86_64|amd64) SHARP_CPU="x64" ;;
+    *)
+      echo "[bootstrapper] Unsupported architecture for sharp: \$(uname -m)"
+      exit 1
+      ;;
+  esac
+
+  if ! (cd /opt/veolms && node -e 'require("sharp")') >/dev/null 2>&1; then
+    if ! command -v npm >/dev/null 2>&1; then
+      echo "[bootstrapper] npm is required to install sharp but was not found."
+      exit 1
+    fi
+    echo "[bootstrapper] Installing sharp for Linux \$SHARP_CPU..."
+    npm install --prefix /opt/veolms --no-save --no-package-lock --no-audit --no-fund --omit=dev --include=optional --os=linux --cpu="\$SHARP_CPU" sharp@0.34.5
+  fi
+  (cd /opt/veolms && node -e 'require("sharp")')
+  echo "[bootstrapper] sharp runtime verified for Linux \$SHARP_CPU."
+fi
+
 echo "[bootstrapper] Launching VeoLMS Media Worker..."
 cd /opt/veolms
 node worker.js >> /var/log/veolms-worker.log 2>&1
