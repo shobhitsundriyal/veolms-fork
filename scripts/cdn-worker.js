@@ -27,6 +27,10 @@
  * - public/avatars/{userId}/original.{extension}
  * - public/avatars/{userId}/{width}.webp
  *
+ * Avatar variants use stable URLs but are deliberately bypassed in the
+ * Worker cache and returned with no-store so replacing the original cannot
+ * leave an old variant at the edge.
+ *
  * API-side token variables:
  * - CDN_TOKEN_TTL_SECONDS: normal protected-media token lifetime.
  * - CDN_HLS_TOKEN_TTL_SECONDS: protected HLS segment token lifetime.
@@ -121,6 +125,7 @@ export default {
       method === "GET" &&
       !rangeHeader &&
       !hasConditionalHeaders &&
+      !isAvatarImageVariantKey(objectKey) &&
       isWildcardCors(env);
     const cacheKey = canUseSharedCache ? createCacheKey(request) : undefined;
 
@@ -489,6 +494,10 @@ function matchesFolder(objectKey, folders) {
   );
 }
 
+function isAvatarImageVariantKey(objectKey) {
+  return /^(?:public|protected)\/avatars\//u.test(objectKey);
+}
+
 function normalizePathPrefix(value) {
   const trimmed = String(value || "").trim();
   if (!trimmed || trimmed === "/") return "";
@@ -684,6 +693,7 @@ function cacheControlForKey(objectKey) {
     if (/^(?:public|protected)\/thumbnails\//u.test(objectKey)) {
       return "public, max-age=31536000, immutable";
     }
+    if (isAvatarImageVariantKey(objectKey)) return "no-store";
     return "public, max-age=300";
   }
   if (MANIFEST_PATTERN.test(objectKey)) {
