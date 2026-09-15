@@ -8,7 +8,7 @@ This directory contains the complete set of IAM policies and automation scripts 
 
 | Policy File                            | Intended Target                                         | Purpose                                                                                           | Scope                                                                                                                 |
 | -------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| **`cicd-infra-deployer-policy.json`**  | IAM User / GitHub Actions (`veolms-fleet-infra-action`) | Used by GitHub Actions to update Lambda function code and upload bundles to the S3 build bucket.  | Least-privilege: S3 build bucket (`bundles/*`) & `veolms-*` Lambdas only.                                             |
+| **`cicd-infra-deployer-policy.json`**  | IAM User / GitHub Actions (`veolms-fleet-infra-action`) | Used by GitHub Actions to update Lambda function code, invoke the fleet/probe functions, and upload bundles to the S3 build bucket.  | Least-privilege: S3 build bucket (`bundles/*`) & the two `veolms-*` Lambdas only.                                             |
 | **`infra-provisioner-policy.json`**    | IAM User / Admin / Provisioning Role                    | Used by the engineer or pipeline running `pnpm fleet:infra` to create all resources from scratch. | Creates S3 buckets, IAM roles/instance profiles, Lambdas, CloudWatch log groups, and EventBridge schedules.           |
 | **`worker-runtime-trust-policy.json`** | Trust Relationship on `VeoLMSWorkerRole`                | Allows AWS services to assume the worker runtime role.                                            | Trusted Services: `ec2.amazonaws.com`, `lambda.amazonaws.com`, `scheduler.amazonaws.com`.                             |
 | **`worker-runtime-policy.json`**       | Permissions Policy attached to `VeoLMSWorkerRole`       | Permissions used by EC2 transcode workers and Fleet Manager Lambdas during job processing.        | Reads/writes video segments in S3, manages EC2 spot worker lifecycle, reports CloudWatch logs, and schedules wakeups. |
@@ -24,6 +24,7 @@ If you want to create an IAM User or Role specifically to run the setup tool `pn
 - **S3**: Creates media storage and build buckets with CORS configurations and public-read policies.
 - **IAM**: Creates `VeoLMSWorkerRole` and `VeoLMSWorkerInstanceProfile`.
 - **Lambda**: Creates `veolms-fleet-manager` and `veolms-video-metadata-probe`.
+- **S3 → Lambda trigger**: Grants S3 permission to invoke the probe for `raw/*.mp4`; the probe invokes Fleet Manager by function name after metadata extraction.
 - **CloudWatch Logs**: Creates log groups `/veolms/*` with retention policies.
 - **EventBridge**: Creates scheduler execution roles and schedule groups.
 - **EC2**: Creates security groups and key pairs.

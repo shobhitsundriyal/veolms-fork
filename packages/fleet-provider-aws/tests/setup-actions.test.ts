@@ -241,6 +241,25 @@ describe("AWS Setup Module Interface", () => {
     assert.ok(s3Statement.Action.includes("s3:DeleteObjectVersion"));
   });
 
+  it("should allow the CI/CD IAM user to invoke the fleet Lambda functions", () => {
+    const policyPath = path.join(
+      import.meta.dirname,
+      "..",
+      "iam",
+      "cicd-infra-deployer-policy.json",
+    );
+    const policy = JSON.parse(fs.readFileSync(policyPath, "utf-8"));
+    const invokeStatement = policy.Statement.find(
+      (s: { Sid: string }) => s.Sid === "LambdaFunctionInvocation",
+    );
+    assert.ok(
+      invokeStatement,
+      "LambdaFunctionInvocation statement should exist",
+    );
+    assert.deepEqual(invokeStatement.Action, ["lambda:InvokeFunction"]);
+    assert.equal(invokeStatement.Resource.length, 2);
+  });
+
   it("should write local storage provider without S3 bucket", async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "veolms-env-local-"));
     const fleetEnvDir = path.join(tempDir, "apps", "fleet-manager");
@@ -275,7 +294,9 @@ describe("AWS Setup Module Interface", () => {
       await setupModule.generateEnvFiles(answers, result, tempDir);
 
       const fleetEnv = setupModule.parseEnvFile(path.join(fleetEnvDir, ".env"));
-      const workerEnv = setupModule.parseEnvFile(path.join(workerEnvDir, ".env"));
+      const workerEnv = setupModule.parseEnvFile(
+        path.join(workerEnvDir, ".env"),
+      );
 
       assert.equal(fleetEnv["STORAGE_PROVIDER"], "local");
       assert.equal(workerEnv["STORAGE_PROVIDER"], "local");
@@ -325,7 +346,9 @@ describe("AWS Setup Module Interface", () => {
       await setupModule.generateEnvFiles(answers, result, tempDir);
 
       const fleetEnv = setupModule.parseEnvFile(path.join(fleetEnvDir, ".env"));
-      const workerEnv = setupModule.parseEnvFile(path.join(workerEnvDir, ".env"));
+      const workerEnv = setupModule.parseEnvFile(
+        path.join(workerEnvDir, ".env"),
+      );
 
       assert.equal(fleetEnv["STORAGE_PROVIDER"], "s3");
       assert.equal(fleetEnv["S3_BUCKET"], "minio-media");
@@ -340,6 +363,70 @@ describe("AWS Setup Module Interface", () => {
       assert.equal(workerEnv["S3_ACCESS_KEY_ID"], "minioadmin");
       assert.equal(workerEnv["S3_SECRET_ACCESS_KEY"], "miniopassword");
       assert.equal(workerEnv["S3_FORCE_PATH_STYLE"], "true");
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("should write Floci endpoint, test credentials, and container database URL", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "veolms-env-floci-"));
+    const fleetEnvDir = path.join(tempDir, "apps", "fleet-manager");
+    const workerEnvDir = path.join(tempDir, "apps", "media-worker");
+    fs.mkdirSync(fleetEnvDir, { recursive: true });
+    fs.mkdirSync(workerEnvDir, { recursive: true });
+
+    try {
+      await setupModule.generateEnvFiles(
+        {
+          targetEnv: "floci",
+          endpointUrl: "http://localhost:4566",
+          region: "us-east-1",
+          fleetMode: "serverless",
+          databaseUrl: "postgresql://veolms:veolms@localhost:5433/veolms",
+          containerDatabaseUrl:
+            "postgresql://veolms:veolms@postgres:5432/veolms",
+          storageProvider: "s3",
+          s3BucketName: "veolms-floci-media",
+          s3BuildBucket: "veolms-floci-build",
+          s3CredentialMode: "automatic",
+          maxWorkers: 2,
+          workerIdlePollSeconds: 15,
+          useSpot: false,
+          bootMode: "fresh",
+          amiId: "ami-ubuntu2404",
+          allowedInstanceTypes: ["c7g.large"],
+        } as any,
+        {
+          workerRoleArn: "arn:aws:iam::000000000000:role/r",
+          instanceProfileArn: "arn:aws:iam::000000000000:instance-profile/p",
+          logGroupWorkers: "/w",
+          logGroupFleet: "/f",
+          lambdaFunctionArn:
+            "arn:aws:lambda:us-east-1:000000000000:function:veolms-fleet-manager",
+          probeLambdaArn: null,
+          s3BucketName: "veolms-floci-media",
+          s3BuildBucket: "veolms-floci-build",
+        } as any,
+        tempDir,
+      );
+
+      const fleetEnv = setupModule.parseEnvFile(path.join(fleetEnvDir, ".env"));
+      const workerEnv = setupModule.parseEnvFile(
+        path.join(workerEnvDir, ".env"),
+      );
+
+      assert.equal(fleetEnv["FLOCI_ENDPOINT"], "http://localhost:4566");
+      assert.equal(fleetEnv["AWS_ENDPOINT_URL"], "http://localhost:4566");
+      assert.equal(fleetEnv["AWS_ACCESS_KEY_ID"], "test");
+      assert.equal(fleetEnv["AWS_SECRET_ACCESS_KEY"], "test");
+      assert.equal(
+        fleetEnv["FLOCI_DATABASE_URL"],
+        "postgresql://veolms:veolms@postgres:5432/veolms",
+      );
+      assert.equal(fleetEnv["AMI_ID"], "ami-ubuntu2404");
+      assert.equal(workerEnv["FLOCI_ENDPOINT"], "http://localhost:4566");
+      assert.equal(workerEnv["S3_ACCESS_KEY_ID"], "test");
+      assert.equal(workerEnv["S3_SECRET_ACCESS_KEY"], "test");
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }

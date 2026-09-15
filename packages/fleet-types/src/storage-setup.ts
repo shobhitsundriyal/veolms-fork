@@ -53,7 +53,8 @@ export async function promptStorageConfig(
         value: "local" as const,
       },
       {
-        label: "S3 / S3-compatible storage (AWS S3, MinIO, Cloudflare R2, etc.)",
+        label:
+          "S3 / S3-compatible storage (AWS S3, MinIO, Cloudflare R2, etc.)",
         value: "s3" as const,
       },
     ],
@@ -164,7 +165,7 @@ export async function promptStorageConfig(
 
   const s3ForcePathStyle = await askChoice(
     rl,
-    "Use path-style URLs (S3_FORCE_PATH_STYLE)? (recommended for MinIO/LocalStack)",
+    "Use path-style URLs (S3_FORCE_PATH_STYLE)? (recommended for MinIO/Floci)",
     [
       {
         label: "true (Path style: http://endpoint/bucket/key)",

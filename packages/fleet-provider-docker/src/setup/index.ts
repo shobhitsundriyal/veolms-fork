@@ -256,8 +256,7 @@ ${bold(cyan("╚═════════════════════�
         value: "cli" as const,
       },
       {
-        label:
-          "Docker Engine Unix Socket (Required inside container/LocalStack)",
+        label: "Docker Engine Unix Socket (Required inside container/Floci)",
         value: "socket" as const,
       },
     ];

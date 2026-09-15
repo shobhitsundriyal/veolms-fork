@@ -165,6 +165,15 @@ export async function runSetupCicdIam(
           ],
         },
         {
+          Sid: "LambdaFunctionInvocation",
+          Effect: "Allow",
+          Action: ["lambda:InvokeFunction"],
+          Resource: [
+            `arn:aws:lambda:${region}:${accountId}:function:veolms-fleet-manager`,
+            `arn:aws:lambda:${region}:${accountId}:function:veolms-video-metadata-probe`,
+          ],
+        },
+        {
           Sid: "CloudWatchLogsDescribe",
           Effect: "Allow",
           Action: ["logs:DescribeLogGroups"],

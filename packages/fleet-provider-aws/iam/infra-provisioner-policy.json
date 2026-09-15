@@ -13,6 +13,8 @@
         "s3:GetBucketPolicy",
         "s3:PutBucketCors",
         "s3:GetBucketCors",
+        "s3:GetBucketNotification",
+        "s3:PutBucketNotification",
         "s3:PutBucketPublicAccessBlock",
         "s3:GetBucketPublicAccessBlock",
         "s3:PutPublicAccessBlock",
@@ -78,7 +80,9 @@
         "lambda:GetLayerVersion",
         "lambda:DeleteLayerVersion",
         "lambda:TagResource",
-        "lambda:InvokeFunction"
+        "lambda:InvokeFunction",
+        "lambda:AddPermission",
+        "lambda:RemovePermission"
       ],
       "Resource": [
         "arn:aws:lambda:*:*:function:veolms-*",

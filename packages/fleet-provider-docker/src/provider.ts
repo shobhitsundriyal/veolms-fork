@@ -35,7 +35,7 @@ export interface DockerProviderConfig {
   readonly workerDatabaseUrl?: string;
   readonly defaultEnv?: Readonly<Record<string, string>>;
   readonly dockerCommand?: string;
-  /** Uses Docker Engine's Unix-socket API; required inside a LocalStack Lambda. */
+  /** Uses Docker Engine's Unix-socket API; required inside a Floci Lambda. */
   readonly transport?: "cli" | "socket";
   readonly socketPath?: string;
 }
@@ -153,14 +153,14 @@ function buildWorkerEnvironment(options: {
   return {
     ...options.defaultEnv,
     ...options.spec.environmentVariables,
-    ...(databaseUrl
-      ? { DATABASE_URL: databaseUrl }
-      : {}),
+    ...(databaseUrl ? { DATABASE_URL: databaseUrl } : {}),
     ...(process.env.STORAGE_PROVIDER
       ? { STORAGE_PROVIDER: process.env.STORAGE_PROVIDER }
       : {}),
     ...(process.env.S3_BUCKET ? { S3_BUCKET: process.env.S3_BUCKET } : {}),
-    ...(process.env.S3_ENDPOINT ? { S3_ENDPOINT: process.env.S3_ENDPOINT } : {}),
+    ...(process.env.S3_ENDPOINT
+      ? { S3_ENDPOINT: process.env.S3_ENDPOINT }
+      : {}),
     ...(process.env.S3_REGION ? { S3_REGION: process.env.S3_REGION } : {}),
     ...(process.env.S3_ACCESS_KEY_ID
       ? { S3_ACCESS_KEY_ID: process.env.S3_ACCESS_KEY_ID }
@@ -178,7 +178,7 @@ function buildWorkerEnvironment(options: {
   };
 }
 
-/** Docker Engine create payload used by the LocalStack Lambda fallback. */
+/** Docker Engine create payload used by the Floci Lambda fallback. */
 export function buildDockerCreateRequest(options: {
   workerId: string;
   spec: WorkerSpec;
@@ -536,7 +536,7 @@ export function createDockerProvider(
               .filter(Boolean);
       // A long-lived serverful manager knows the containers it created. Keep
       // those records visible when a nested Docker socket cannot enumerate
-      // them (a common Desktop/LocalStack topology); normal DB heartbeats and
+      // them (a common Desktop/Floci topology); normal DB heartbeats and
       // termination still reconcile a genuinely dead worker.
       const ids = new Set(discoveredIds);
       if (transport === "socket") {

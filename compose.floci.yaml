@@ -1,0 +1,31 @@
+# Local AWS-shaped infrastructure for the AWS fleet provider.
+# `pnpm run fleet:infra` starts this service automatically when Floci is selected.
+# This file intentionally does not define or start PostgreSQL; DATABASE_URL is
+# taken from the hosted root .env configuration.
+services:
+  floci:
+    image: ${FLOCI_IMAGE:-floci/floci:latest}
+    user: root
+    ports:
+      - "${FLOCI_PORT:-4566}:4566"
+    environment:
+      FLOCI_HOSTNAME: floci
+      FLOCI_DEFAULT_REGION: ${AWS_REGION:-us-east-1}
+      FLOCI_DEFAULT_ACCOUNT_ID: "000000000000"
+      FLOCI_STORAGE_MODE: ${FLOCI_STORAGE_MODE:-hybrid}
+      FLOCI_STORAGE_PERSISTENT_PATH: /app/data
+      FLOCI_SERVICES_DOCKER_NETWORK: ${DOCKER_NETWORK:-veolms-fleet}
+      FLOCI_SERVICES_EC2_VPC_NETWORKS_ENABLED: ${FLOCI_EC2_VPC_NETWORKS_ENABLED:-false}
+      FLOCI_SERVICES_EC2_MOCK: "false"
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: ${AWS_REGION:-us-east-1}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${FLOCI_DATA_DIR:-./.data/floci}:/app/data
+    networks:
+      - veolms
+
+networks:
+  veolms:
+    name: ${DOCKER_NETWORK:-veolms-fleet}

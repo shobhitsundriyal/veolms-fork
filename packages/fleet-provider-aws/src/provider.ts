@@ -25,7 +25,6 @@ import type {
 } from "@veolms/fleet-types";
 import {
   encodeUserDataBase64,
-  generateLocalStackUserDataScript,
   generateUserDataScript,
 } from "./bootstrapper.ts";
 import { loadAwsProviderConfig } from "./config.ts";
@@ -39,7 +38,12 @@ import {
   type AwsSchedulerConfig,
   type AwsSchedulerManager,
 } from "./scheduler.ts";
-import { LOCALSTACK_DOCKER_AMI_ID } from "./localstack-constants.ts";
+import {
+  FLOCI_DEFAULT_AMI_ID,
+  awsS3ClientOptions,
+  awsServiceClientOptions,
+  resolveFlociEndpoint,
+} from "./floci.ts";
 
 // Capacity/availability-class RunInstances errors: worth trying the next
 // same-size candidate for. Everything else (bad AMI, IAM, subnet, etc.)
@@ -146,9 +150,13 @@ export function createAwsProvider(
           .filter(Boolean)
       : undefined);
 
-  const ec2 = config.ec2Client ?? new EC2Client({ region });
-  const ssm = config.ssmClient ?? new SSMClient({ region });
-  const s3Endpoint = process.env.S3_ENDPOINT || process.env.AWS_ENDPOINT_URL;
+  const flociEndpoint = resolveFlociEndpoint();
+  const isFloci = Boolean(flociEndpoint);
+  const ec2 =
+    config.ec2Client ?? new EC2Client(awsServiceClientOptions(region));
+  const ssm =
+    config.ssmClient ?? new SSMClient(awsServiceClientOptions(region));
+  const s3Endpoint = process.env.S3_ENDPOINT || flociEndpoint;
   const s3AccessKeyId = process.env.S3_ACCESS_KEY_ID;
   const s3SecretAccessKey = process.env.S3_SECRET_ACCESS_KEY;
   const s3Credentials =
@@ -158,13 +166,14 @@ export function createAwsProvider(
   const s3 =
     config.s3Client ??
     new S3Client({
-      region: process.env.S3_REGION || region,
-      ...(s3Endpoint
+      ...(isFloci
+        ? awsS3ClientOptions(process.env.S3_REGION || region)
+        : { region: process.env.S3_REGION || region }),
+      ...(!isFloci && s3Endpoint
         ? {
             endpoint: s3Endpoint,
             forcePathStyle:
-              process.env.S3_FORCE_PATH_STYLE === "true" ||
-              Boolean(process.env.AWS_ENDPOINT_URL),
+              process.env.S3_FORCE_PATH_STYLE === "true" || Boolean(s3Endpoint),
           }
         : {}),
       ...(s3Credentials ? { credentials: s3Credentials } : {}),
@@ -175,11 +184,6 @@ export function createAwsProvider(
       region,
       ...config.schedulerConfig,
     });
-  // LocalStack Docker VM manager only accepts its tagged Docker AMIs.
-  // Real AWS AMI IDs are API-only/mock resources in LocalStack and do not
-  // create an instance container or execute UserData.
-  const isLocalStack = Boolean(process.env.AWS_ENDPOINT_URL);
-
   return {
     name: "aws",
 
@@ -195,38 +199,52 @@ export function createAwsProvider(
         allowedInstanceTypes,
       );
 
-      const imageId =
-        amiId ??
-        (isLocalStack
-          ? LOCALSTACK_DOCKER_AMI_ID
-          : await resolveDebianAmiId(ssm, region, spec.architecture));
-      // LocalStack's EC2 mock doesn't model real AMI metadata (see the
-      // isLocalStack comment above), so DescribeImages there wouldn't
-      // return a meaningful RootDeviceName — skip straight to the default.
-      const rootDeviceName = isLocalStack
+      // Floci maps these documented aliases to Docker images. Never resolve a
+      // cloud AMI through SSM when a local endpoint is configured.
+      const imageId = isFloci
+        ? (amiId ?? FLOCI_DEFAULT_AMI_ID)
+        : (amiId ?? (await resolveDebianAmiId(ssm, region, spec.architecture)));
+      const rootDeviceName = isFloci
         ? DEFAULT_ROOT_DEVICE_NAME
         : await resolveRootDeviceName(ec2, imageId);
 
       const bucketName = config.s3BucketName ?? envConfig.S3_BUCKET;
       const buildBucket =
         config.s3BuildBucket ?? envConfig.S3_BUILD_BUCKET ?? bucketName;
+      const workerDatabaseUrl = isFloci
+        ? process.env.FLOCI_DATABASE_URL || process.env.DATABASE_URL
+        : undefined;
       const defaultAwsEnv: Record<string, string> = {
         AWS_REGION: region,
+        ...(workerDatabaseUrl ? { DATABASE_URL: workerDatabaseUrl } : {}),
         STORAGE_PROVIDER: envConfig.STORAGE_PROVIDER,
         LOCAL_STORAGE_ROOT: process.env.LOCAL_STORAGE_ROOT ?? "/app/s3-bucket",
         WORKER_MAX_JOBS: process.env.WORKER_MAX_JOBS ?? "1",
         FLEET_TEST_MODE: process.env.FLEET_TEST_MODE ?? "false",
         ...(bucketName ? { S3_BUCKET: bucketName } : {}),
         ...(buildBucket ? { S3_BUILD_BUCKET: buildBucket } : {}),
-        ...(process.env.S3_ENDPOINT ? { S3_ENDPOINT: process.env.S3_ENDPOINT } : {}),
-        ...(process.env.S3_REGION ? { S3_REGION: process.env.S3_REGION } : {}),
-        ...(process.env.S3_ACCESS_KEY_ID
+        ...(!isFloci && process.env.S3_ENDPOINT
+          ? { S3_ENDPOINT: process.env.S3_ENDPOINT }
+          : {}),
+        ...(!isFloci && process.env.S3_REGION
+          ? { S3_REGION: process.env.S3_REGION }
+          : {}),
+        ...(!isFloci && process.env.S3_ACCESS_KEY_ID
           ? { S3_ACCESS_KEY_ID: process.env.S3_ACCESS_KEY_ID }
           : {}),
-        ...(process.env.S3_SECRET_ACCESS_KEY
+        ...(!isFloci && process.env.S3_SECRET_ACCESS_KEY
           ? { S3_SECRET_ACCESS_KEY: process.env.S3_SECRET_ACCESS_KEY }
           : {}),
-        ...(process.env.S3_FORCE_PATH_STYLE
+        ...(isFloci
+          ? {
+              AWS_ACCESS_KEY_ID: "test",
+              AWS_SECRET_ACCESS_KEY: "test",
+              S3_ACCESS_KEY_ID: "test",
+              S3_SECRET_ACCESS_KEY: "test",
+              S3_FORCE_PATH_STYLE: "true",
+            }
+          : {}),
+        ...(!isFloci && process.env.S3_FORCE_PATH_STYLE
           ? { S3_FORCE_PATH_STYLE: process.env.S3_FORCE_PATH_STYLE }
           : {}),
         ...config.defaultEnv,
@@ -237,9 +255,7 @@ export function createAwsProvider(
         spec,
         extraEnv: defaultAwsEnv,
       };
-      const userDataScript = isLocalStack
-        ? generateLocalStackUserDataScript(bootstrapOptions)
-        : generateUserDataScript(bootstrapOptions);
+      const userDataScript = generateUserDataScript(bootstrapOptions);
 
       const userDataBase64 = encodeUserDataBase64(userDataScript);
 
@@ -263,7 +279,9 @@ export function createAwsProvider(
           IamInstanceProfile: iamInstanceProfile
             ? { Name: iamInstanceProfile }
             : undefined,
-          InstanceMarketOptions: useSpot ? { MarketType: "spot" } : undefined,
+          // Floci models the EC2 API but has no Spot capacity or billing.
+          InstanceMarketOptions:
+            useSpot && !isFloci ? { MarketType: "spot" } : undefined,
           BlockDeviceMappings: [
             {
               DeviceName: rootDeviceName,

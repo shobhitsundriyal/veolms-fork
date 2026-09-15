@@ -38,7 +38,7 @@ flowchart TD
 
 ## Step 1: Select Cloud Provider
 
-VeoLMS features a pluggable provider architecture supporting both `aws` (production cloud fleet) and `local` (Docker / LocalStack development).
+VeoLMS features a pluggable provider architecture supporting `aws` (production cloud fleet or local Floci) and `local` (in-process development).
 
 Run the provider selection tool from the workspace root:
 
@@ -91,6 +91,7 @@ All policy definitions live in [`packages/fleet-provider-aws/iam/`](../packages/
 1. **Infrastructure Provisioning Policy** ([`infra-provisioner-policy.json`](../packages/fleet-provider-aws/iam/infra-provisioner-policy.json)):
    - Used by any engineer, admin, or script executing `pnpm fleet:infra`.
    - Grants permissions to create S3 buckets, IAM roles/instance profiles, Lambda functions, CloudWatch log groups, and EventBridge schedules.
+   - Also registers the S3 `raw/*.mp4` notification and grants S3 permission to invoke the metadata-probe Lambda.
 2. **Worker Runtime Role Policy** ([`worker-runtime-policy.json`](../packages/fleet-provider-aws/iam/worker-runtime-policy.json)) & Trust Policy ([`worker-runtime-trust-policy.json`](../packages/fleet-provider-aws/iam/worker-runtime-trust-policy.json)):
    - Attached to `VeoLMSWorkerRole` and assumed by EC2 transcode instances, Fleet Manager Lambdas, and EventBridge Scheduler.
    - Allows reading raw video and writing HLS segments to S3, provisioning EC2 spot instances, reporting CloudWatch logs, and scheduling wakeups.
@@ -100,6 +101,10 @@ All policy definitions live in [`packages/fleet-provider-aws/iam/`](../packages/
 ## Step 3: Create Dedicated CI/CD IAM User & Policy
 
 To automate updates securely without exposing root or administrative AWS credentials in GitHub, create a dedicated least-privilege IAM user for GitHub Actions.
+
+Its policy also allows `lambda:InvokeFunction` for the Fleet Manager and
+metadata-probe functions, so an API configured with that user's keys can
+invoke a configured Lambda by function name.
 
 ### Automated Setup Command
 
