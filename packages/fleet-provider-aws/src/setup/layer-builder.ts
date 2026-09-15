@@ -64,7 +64,9 @@ export function resolveDockerDir(): string {
  */
 export function isDockerRunning(): boolean {
   try {
-    execSync("docker info", { stdio: "ignore" });
+    // Keep the setup wizard and its health check bounded when Docker is
+    // installed but its socket is unavailable or unresponsive.
+    execSync("docker info", { stdio: "ignore", timeout: 2000 });
     return true;
   } catch {
     return false;

@@ -16,7 +16,8 @@
   "dependencies": {
     "@veolms/config": "workspace:*",
     "@veolms/database": "workspace:*",
-    "@veolms/fleet-types": "workspace:*"
+    "@veolms/fleet-types": "workspace:*",
+    "@veolms/storage": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^24.10.13",

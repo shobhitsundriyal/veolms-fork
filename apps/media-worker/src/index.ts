@@ -1,4 +1,3 @@
-import { resolve } from "node:path";
 import { claimNextQueuedImageJob, createDatabase } from "@veolms/database";
 import { isMainModule } from "@veolms/fleet-types";
 import { loadMediaWorkerConfig } from "@veolms/config";

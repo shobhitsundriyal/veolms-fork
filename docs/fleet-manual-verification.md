@@ -1,36 +1,44 @@
 # Fleet Manager — Manual Verification Runbook
 
 Two commands, run in order, to manually provision infra and push a test job
-through the pipeline. Both are interactive/CLI — this doc lists exactly what
-each prompt asks and what to answer, based on a working real-AWS run.
+through the pipeline. The default verification path is local Floci; the same
+AWS provider can still be pointed at real AWS explicitly.
 
 ---
 
-## 1. Provision infrastructure — `pnpm fleet:infra`
+## 1. Provision infrastructure — provider, then infra
 
 Run from the repo root:
 
 ```bash
-pnpm fleet:infra
+pnpm run fleet:provider   # select AWS (option 1)
+pnpm run fleet:infra      # select Floci in the infra wizard
 ```
 
-It asks 12 questions in order. Press Enter to accept the shown default.
+It starts only the Floci control plane after you select Floci; PostgreSQL is
+not started. The questions below appear after that. Press Enter to accept the
+shown default.
 
-| #   | Prompt                                                    | What to answer                                                                                                                                                                                       |
-| --- | --------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | Target Environment                                        | `1` = Real AWS (billed) · `2` = LocalStack (free, needs LocalStack running)                                                                                                                          |
-| 1b  | LocalStack endpoint URL _(only if you picked LocalStack)_ | Default is `http://localhost.localstack.cloud:4566`. If that hostname won't resolve on your machine/sandbox, type `http://localhost:4566` instead.                                                   |
-| 2   | AWS region                                                | e.g. `us-east-1`                                                                                                                                                                                     |
-| 3   | Fleet Manager Mode                                        | `1` = Serverless (Lambda) · `2` = Serverful (daemon)                                                                                                                                                 |
-| 4   | Video Storage Provider                                    | `1` = S3                                                                                                                                                                                             |
-| 5   | S3 bucket name                                            | An existing or new bucket name. If it doesn't exist, it's created with public read.                                                                                                                  |
-| 6   | S3 credential mode                                        | `1` = Automatic (EC2 instance role — recommended)                                                                                                                                                    |
-| 7   | PostgreSQL DATABASE_URL                                   | Must be reachable from AWS/LocalStack, not just your machine — a cloud Postgres URL (e.g. Neon) works; localhost does not. Enter accepts the default already in `.env`/env.                          |
-| 8   | Allowed EC2 instance types                                | `1` = Balanced Graviton & x86 (default: `c7g.large,c7g.xlarge,c7g.2xlarge,c6i.large,c6i.xlarge`) · `2` = Graviton wildcards (`c7g.*,c8g.*,c6g.*`) · `3` = Unrestricted · `4` = Budget · `5` = Custom |
-| 9   | EC2 Worker Boot Mode                                      | `1` = Fresh install (apt-installs Node/FFmpeg on boot, ~1-3 min) · `2` = Pre-baked AMI (needs `pnpm fleet:build-ami` first)                                                                          |
-| 10  | Max concurrent workers                                    | Default `8`. Now actually enforced — see below.                                                                                                                                                      |
-| 11  | Worker idle poll interval (seconds)                       | Default `15`. How long an idle worker waits for one more queue check before self-terminating — see below.                                                                                            |
-| 12  | EC2 Pricing Model                                         | `1` = Spot (cheaper, recommended) · `2` = On-Demand                                                                                                                                                  |
+| #         | Prompt                                 | What to answer                                                                                               |
+| --------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| 1         | Target Environment                     | `1` = Floci local emulator (free, Docker only) · `2` = AWS cloud (billed, explicit credentials)              |
+| 1b        | Floci endpoint _(Floci only)_          | Default `http://localhost:4566`; spawned Lambda/EC2 containers use the Compose hostname `http://floci:4566`. |
+| 2         | AWS region                             | e.g. `us-east-1`                                                                                             |
+| preflight | Credentials check                      | Floci uses deterministic local test credentials; AWS uses the selected AWS profile/environment credentials.  |
+| 3         | Fleet Manager Mode                     | `1` = Serverless (Lambda) · `2` = Serverful (daemon)                                                         |
+| 4         | Lambda architecture _(serverless)_     | `1` = ARM64 · `2` = x86_64                                                                                   |
+| 5         | Probe Lambda _(serverless)_            | `1` = Build/deploy ffprobe probe · `2` = Skip                                                                |
+| 6         | Video Storage Provider                 | `1` = Local storage · `2` = S3; S3 is the default for Floci                                                  |
+| 6a        | S3 buckets and credentials _(S3 only)_ | Choose private/public media access, a media bucket, a build bucket, and IAM/manual credentials.              |
+| 7         | Fleet manager `DATABASE_URL`           | The hosted `DATABASE_URL` from the root `.env` is accepted and is used for PostgreSQL access.                |
+| 7b        | Container database _(Floci only)_      | The hosted root URL is reused automatically; no local PostgreSQL container is needed.                        |
+| 8         | Allowed EC2 instance types             | `1` = Balanced · `2` = Graviton wildcards · `3` = Unrestricted · `4` = Budget · `5` = Custom                 |
+| 9         | EC2 Worker Boot Mode                   | Floci automatically uses fresh `ami-debian12`; AWS can use fresh install or a pre-baked AMI.         |
+| 10        | SSH access                             | Floci/AWS can create or reuse the SSH security group.                                                        |
+| 11        | SSH key pair                           | Optional; leave empty for SSM/console access.                                                                |
+| 12        | Max concurrent workers                 | Default `8`.                                                                                                 |
+| 13        | Worker idle poll interval (seconds)    | Default `15`; how long an idle worker waits before self-terminating.                                         |
+| 14        | EC2 Pricing Model                      | Floci automatically uses on-demand API semantics; AWS offers Spot or On-Demand.                              |
 
 **What it creates:** IAM role `VeoLMSWorkerRole` + instance profile
 `VeoLMSWorkerInstanceProfile`, CloudWatch log groups `/veolms/workers` and
@@ -86,11 +94,10 @@ profile/log groups, updated the existing `veolms-fleet-manager` Lambda's
 code and env vars, reused the existing `veo-lms-test` bucket, uploaded the
 worker bundle to it, and wrote both `.env` files.
 
-For the **LocalStack** path earlier in the same session, the only different
-answers were: `2` (LocalStack) at prompt 1, `http://localhost:4566` at the
-endpoint prompt (the default `http://localhost.localstack.cloud:4566`
-wouldn't resolve in that sandbox), and `veolms-localstack-test` for the
-bucket name — everything else was the same as above.
+For a local Floci run, choose `1` at prompt 1, accept
+`http://localhost:4566`, use a disposable bucket such as
+`veolms-floci-test`, and keep Spot disabled (the wizard does this
+automatically for Floci). All SDK and CLI calls remain pinned to Floci.
 
 ---
 

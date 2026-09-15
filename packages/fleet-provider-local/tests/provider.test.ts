@@ -118,4 +118,100 @@ describe("Local Fleet Provider", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it("exports lifecycle setup modules and supports configureEnv with local storage", async () => {
+    const { configureEnv, provisionInfra } =
+      await import("../src/setup/index.ts");
+    assert.equal(typeof configureEnv, "function");
+    assert.equal(typeof provisionInfra, "function");
+
+    const responses = [
+      "postgresql://test:test@localhost:5432/test", // db url
+      "1", // local storage
+    ];
+    const mockRl = {
+      question: async () => responses.shift() ?? "",
+    } as any;
+
+    const tempDir = await mkdtemp(join(tmpdir(), "veolms-local-env-test-"));
+    try {
+      const res = await configureEnv({
+        cwd: tempDir,
+        rl: mockRl,
+        nonInteractive: false,
+      });
+      assert.equal(res.provider, "local");
+      assert.equal(res.details?.storageProvider, "local");
+      assert.equal(res.envFiles.length, 2);
+      assert.ok(res.envFiles.every((file) => file.startsWith(tempDir)));
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("supports configureEnv with s3 storage for local provider", async () => {
+    const { configureEnv } = await import("../src/setup/index.ts");
+    const responses = [
+      "postgresql://test:test@localhost:5432/test", // db url
+      "2", // s3 storage
+      "local-minio-bucket", // bucket
+      "http://localhost:9000", // endpoint
+      "us-east-1", // region
+      "minioadmin", // access key
+      "miniopassword", // secret key
+      "1", // path style: true
+    ];
+    const mockRl = {
+      question: async () => responses.shift() ?? "",
+    } as any;
+
+    const tempDir = await mkdtemp(join(tmpdir(), "veolms-local-env-test-"));
+    try {
+      const res = await configureEnv({
+        cwd: tempDir,
+        rl: mockRl,
+        nonInteractive: false,
+      });
+      assert.equal(res.provider, "local");
+      assert.equal(res.details?.storageProvider, "s3");
+      assert.equal(res.details?.S3_BUCKET, "local-minio-bucket");
+      assert.equal(res.details?.S3_ENDPOINT, "http://localhost:9000");
+      assert.ok(res.envFiles.every((file) => file.startsWith(tempDir)));
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses ProviderConfigOptions.env as the storage default without writing the real checkout", async () => {
+    const { configureEnv } = await import("../src/setup/index.ts");
+    const responses = ["postgresql://test:test@localhost:5432/test", ""];
+    const mockRl = {
+      question: async () => responses.shift() ?? "",
+    } as any;
+    const tempDir = await mkdtemp(join(tmpdir(), "veolms-local-env-test-"));
+
+    try {
+      const res = await configureEnv({
+        cwd: tempDir,
+        env: {
+          STORAGE_PROVIDER: "s3",
+          S3_BUCKET: "options-bucket",
+          S3_ENDPOINT: "http://options-minio:9000",
+          S3_REGION: "eu-west-1",
+          S3_ACCESS_KEY_ID: "options-key",
+          S3_SECRET_ACCESS_KEY: "options-secret",
+          S3_FORCE_PATH_STYLE: "true",
+        },
+        rl: mockRl,
+        nonInteractive: false,
+      });
+
+      assert.equal(res.details?.storageProvider, "s3");
+      assert.equal(res.details?.S3_BUCKET, "options-bucket");
+      assert.equal(res.details?.S3_ENDPOINT, "http://options-minio:9000");
+      assert.ok(res.envFiles.every((file) => file.startsWith(tempDir)));
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
 });
