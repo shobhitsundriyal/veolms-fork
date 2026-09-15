@@ -3543,7 +3543,11 @@ async function runUpdateFlow(
 
     let bundleUploaded = false;
     const targetBuildBucket = s3BuildBucket || s3BucketName;
-    if (storageProvider === "s3" && targetBuildBucket) {
+    if (
+      storageProvider === "s3" &&
+      targetBuildBucket &&
+      (s3CredentialMode === "automatic" || targetEnv === "floci")
+    ) {
       info(
         `Rebuilding and uploading build artifacts to ${bold(targetBuildBucket)}...`,
       );
@@ -3730,21 +3734,28 @@ ${bold("Next Steps:")}
         if (endpointUrl) {
           probeEnvVars["AWS_ENDPOINT_URL"] = endpointUrl;
         }
-        if (process.env.S3_ENDPOINT) {
-          probeEnvVars["S3_ENDPOINT"] = process.env.S3_ENDPOINT;
+        const configuredS3Endpoint = s3Endpoint ?? process.env.S3_ENDPOINT;
+        const configuredS3Region = s3Region ?? process.env.S3_REGION;
+        const configuredS3AccessKeyId =
+          s3AccessKeyId ?? process.env.S3_ACCESS_KEY_ID;
+        const configuredS3SecretAccessKey =
+          s3SecretAccessKey ?? process.env.S3_SECRET_ACCESS_KEY;
+        const configuredS3ForcePathStyle =
+          s3ForcePathStyle ?? process.env.S3_FORCE_PATH_STYLE;
+        if (configuredS3Endpoint) {
+          probeEnvVars["S3_ENDPOINT"] = configuredS3Endpoint;
         }
-        if (process.env.S3_REGION) {
-          probeEnvVars["S3_REGION"] = process.env.S3_REGION;
+        if (configuredS3Region) {
+          probeEnvVars["S3_REGION"] = configuredS3Region;
         }
-        if (process.env.S3_ACCESS_KEY_ID) {
-          probeEnvVars["S3_ACCESS_KEY_ID"] = process.env.S3_ACCESS_KEY_ID;
+        if (configuredS3AccessKeyId) {
+          probeEnvVars["S3_ACCESS_KEY_ID"] = configuredS3AccessKeyId;
         }
-        if (process.env.S3_SECRET_ACCESS_KEY) {
-          probeEnvVars["S3_SECRET_ACCESS_KEY"] =
-            process.env.S3_SECRET_ACCESS_KEY;
+        if (configuredS3SecretAccessKey) {
+          probeEnvVars["S3_SECRET_ACCESS_KEY"] = configuredS3SecretAccessKey;
         }
-        if (process.env.S3_FORCE_PATH_STYLE) {
-          probeEnvVars["S3_FORCE_PATH_STYLE"] = process.env.S3_FORCE_PATH_STYLE;
+        if (configuredS3ForcePathStyle) {
+          probeEnvVars["S3_FORCE_PATH_STYLE"] = configuredS3ForcePathStyle;
         }
       }
       probeLambdaArn = await setupProbeLambda(

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { EventEmitter } from "node:events";
 import {
   ask,
   askChoice,
@@ -19,6 +20,33 @@ import {
   warn,
   yellow,
 } from "../src/terminal.ts";
+
+function createSecretReadline(answer: string) {
+  const input = new EventEmitter() as EventEmitter & {
+    isTTY: boolean;
+    isRaw: boolean;
+    isPaused: () => boolean;
+    setRawMode: (mode: boolean) => EventEmitter;
+  };
+  let paused = false;
+  input.isTTY = true;
+  input.isRaw = false;
+  input.isPaused = () => paused;
+  input.pause = () => {
+    paused = true;
+    return input;
+  };
+  input.resume = () => {
+    paused = false;
+    return input;
+  };
+  input.setRawMode = (mode: boolean) => {
+    input.isRaw = mode;
+    return input;
+  };
+  const output = { write: () => true };
+  return { input, output, rl: { input, output } as any, answer };
+}
 
 describe("Terminal & Readline Helpers", () => {
   it("formats ANSI escape strings correctly", () => {
@@ -88,13 +116,12 @@ describe("Terminal & Readline Helpers", () => {
       console.log = originalLog;
     }
 
-    const mockRl = {
-      question: async () => "entered-secret\r\n",
-    } as any;
-    assert.equal(
-      await askSecret(mockRl, "S3 secret", "fallback", false),
-      "entered-secret",
-    );
+    const mockRl = createSecretReadline("entered-secret\r\n");
+    const prompt = askSecret(mockRl.rl, "S3 secret", "fallback", false);
+    queueMicrotask(() => {
+      mockRl.input.emit("data", mockRl.answer);
+    });
+    assert.equal(await prompt, "entered-secret");
   });
 
   it("askChoice: selects default in non-interactive mode or without rl", async () => {

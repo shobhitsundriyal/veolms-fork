@@ -1,6 +1,46 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { EventEmitter } from "node:events";
 import { promptStorageConfig } from "../src/storage-setup.ts";
+
+function createMockRl(responses: string[], secret: string) {
+  const input = new EventEmitter() as EventEmitter & {
+    isTTY: boolean;
+    isRaw: boolean;
+    isPaused: () => boolean;
+    setRawMode: (mode: boolean) => EventEmitter;
+  };
+  let paused = false;
+  input.isTTY = true;
+  input.isRaw = false;
+  input.isPaused = () => paused;
+  input.pause = () => {
+    paused = true;
+    return input;
+  };
+  input.resume = () => {
+    paused = false;
+    return input;
+  };
+  input.setRawMode = (mode: boolean) => {
+    input.isRaw = mode;
+    return input;
+  };
+  const originalOn = input.on.bind(input);
+  input.on = ((event: string, listener: (...args: any[]) => void) => {
+    const result = originalOn(event, listener);
+    if (event === "data") {
+      queueMicrotask(() => input.emit("data", `${secret}\r\n`));
+    }
+    return result;
+  }) as typeof input.on;
+  const output = { write: () => true };
+  return {
+    question: async () => responses.shift() ?? "",
+    input,
+    output,
+  } as any;
+}
 
 describe("Storage Setup Prompt", () => {
   it("selects local storage and generates local env vars", async () => {
@@ -49,12 +89,9 @@ describe("Storage Setup Prompt", () => {
       "http://minio:9000", // endpoint
       "us-west-2", // region
       "minioadmin", // access key
-      "miniopassword", // secret key
       "1", // path style: true
     ];
-    const mockRl = {
-      question: async () => responses.shift() ?? "",
-    } as any;
+    const mockRl = createMockRl(responses, "miniopassword");
 
     const result = await promptStorageConfig({
       rl: mockRl,
@@ -87,12 +124,9 @@ describe("Storage Setup Prompt", () => {
       "", // endpoint (empty)
       "eu-central-1", // region
       "AKIA_TEST", // access key
-      "SECRET_TEST", // secret key
       "2", // path style: false
     ];
-    const mockRl = {
-      question: async () => responses.shift() ?? "",
-    } as any;
+    const mockRl = createMockRl(responses, "SECRET_TEST");
 
     const result = await promptStorageConfig({
       rl: mockRl,

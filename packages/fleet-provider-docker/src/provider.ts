@@ -609,9 +609,10 @@ export function createDockerProvider(
       _qualities?: readonly VideoQualityLevel[],
     ): Promise<boolean> {
       const cleanPrefix = outputPrefix.replace(/^[/\\]+/, "");
-      const masterKey = cleanPrefix.endsWith("/")
-        ? `${cleanPrefix}master.m3u8`
-        : `${cleanPrefix}/master.m3u8`;
+      const normalizedPrefix = cleanPrefix.replace(/^s3-bucket[/\\]/, "");
+      const masterKey = normalizedPrefix.endsWith("/")
+        ? `${normalizedPrefix}master.m3u8`
+        : `${normalizedPrefix}/master.m3u8`;
 
       if (storageVerifier) {
         try {
@@ -623,7 +624,7 @@ export function createDockerProvider(
       }
 
       const { stat } = await import("node:fs/promises");
-      const strippedPrefix = cleanPrefix.replace(/^s3-bucket[/\\]/, "");
+      const strippedPrefix = normalizedPrefix;
 
       const candidateDirs = [
         join(verificationStorageRoot, strippedPrefix),

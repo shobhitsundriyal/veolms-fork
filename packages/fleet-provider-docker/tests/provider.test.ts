@@ -153,7 +153,8 @@ describe("Docker Fleet Provider", () => {
       storageVerifier: {
         headObject: async (key) => {
           requestedKeys.push(key);
-          return key === "output/job-2/master.m3u8"
+          return key === "output/job-2/master.m3u8" ||
+            key === "output/job-3/master.m3u8"
             ? { contentLength: 128 }
             : null;
         },
@@ -161,9 +162,14 @@ describe("Docker Fleet Provider", () => {
     });
 
     assert.equal(await provider.verifyJobOutput!("output/job-2/"), true);
+    assert.equal(
+      await provider.verifyJobOutput!("s3-bucket/output/job-3"),
+      true,
+    );
     assert.equal(await provider.verifyJobOutput!("output/missing/"), false);
     assert.deepEqual(requestedKeys, [
       "output/job-2/master.m3u8",
+      "output/job-3/master.m3u8",
       "output/missing/master.m3u8",
     ]);
   });

@@ -33,6 +33,40 @@ describe("AWS Setup Module Interface", () => {
     assert.equal(typeof setupModule.runSetupCicdIam, "function");
   });
 
+  it("scopes provisioner Lambda permission actions to managed functions", () => {
+    const policy = JSON.parse(
+      fs.readFileSync(
+        new URL("../iam/infra-provisioner-policy.json", import.meta.url),
+        "utf8",
+      ),
+    ) as {
+      Statement: Array<{
+        Sid: string;
+        Action: string[];
+        Resource: string | string[];
+      }>;
+    };
+    const statement = policy.Statement.find(
+      (entry) => entry.Sid === "LambdaPermissionManagement",
+    );
+
+    assert.ok(statement);
+    assert.deepEqual(statement.Action, [
+      "lambda:AddPermission",
+      "lambda:RemovePermission",
+    ]);
+    assert.deepEqual(statement.Resource, [
+      "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:veolms-fleet-manager",
+      "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:veolms-video-metadata-probe",
+    ]);
+    const resources = Array.isArray(statement.Resource)
+      ? statement.Resource
+      : [statement.Resource];
+    assert.ok(
+      !resources.some((resource) => resource.includes(":lambda:*:*:function:")),
+    );
+  });
+
   it("should discover available AWS profiles without throwing", () => {
     const profiles = setupModule.listAvailableAwsProfiles();
     assert.ok(Array.isArray(profiles));

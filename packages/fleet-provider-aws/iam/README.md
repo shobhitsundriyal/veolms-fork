@@ -20,7 +20,9 @@ This directory contains the complete set of IAM policies and automation scripts 
 If you want to create an IAM User or Role specifically to run the setup tool `pnpm fleet:infra`, render and attach [`infra-provisioner-policy.json`](./infra-provisioner-policy.json).
 
 The policy is a template: replace `${S3_BUCKET}` with the configured media
-bucket ARN before attaching it. The `S3MediaBucketNotificationManagement`
+bucket name, and replace `${AWS_REGION}` and `${AWS_ACCOUNT_ID}` with the
+selected AWS region and account ID before attaching it. The
+`S3MediaBucketNotificationManagement`
 statement is intentionally limited to that bucket; remove any optional build
 bucket notification statement if the build bucket is not used for
 notifications. The `CreateBucket` and account-wide inspection permissions
