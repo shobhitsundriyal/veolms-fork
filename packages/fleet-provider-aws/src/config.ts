@@ -31,7 +31,7 @@ export type AwsProviderEnvironmentConfig = z.infer<
 export function resolveS3BucketName(
   env: Readonly<Record<string, string | undefined>>,
 ): string | null {
-  return env["S3_BUCKET"] || null;
+  return env["S3_BUCKET"] || env["STORAGE_BUCKET"] || null;
 }
 
 export function resolveS3BuildBucketName(

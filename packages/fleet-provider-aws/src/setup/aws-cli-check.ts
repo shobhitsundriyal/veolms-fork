@@ -19,6 +19,11 @@ import * as path from "node:path";
 import { execSync } from "node:child_process";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { bold, cyan, dim, green, red } from "@veolms/fleet-types/terminal";
+import {
+  FLOCI_DEFAULT_ACCOUNT_ID,
+  awsServiceClientOptions,
+  resolveFlociEndpoint,
+} from "../floci.ts";
 
 export interface AwsIdentity {
   accountId: string;
@@ -133,7 +138,40 @@ function detectCredentialSource(profile?: string): string {
 export async function checkAwsCredentials(
   region: string,
   profile?: string,
+  endpointUrl?: string,
 ): Promise<AwsIdentity> {
+  const endpoint = endpointUrl?.trim() || resolveFlociEndpoint();
+
+  if (endpoint) {
+    // A local emulator must never fall through to a real profile, shared
+    // credentials file, or instance metadata. Floci accepts deterministic
+    // test credentials and returns a stable local account identity.
+    process.env["FLOCI_ENDPOINT"] = endpoint;
+    process.env["AWS_ENDPOINT_URL"] = endpoint;
+    process.env["AWS_ACCESS_KEY_ID"] = "test";
+    process.env["AWS_SECRET_ACCESS_KEY"] = "test";
+    delete process.env["AWS_PROFILE"];
+
+    const sts = new STSClient({ ...awsServiceClientOptions(region) });
+    try {
+      const identity = await sts.send(new GetCallerIdentityCommand({}));
+      const accountId = identity.Account ?? FLOCI_DEFAULT_ACCOUNT_ID;
+      const userId = identity.UserId ?? "local-floci-user";
+      const arn = identity.Arn ?? `arn:aws:iam::${accountId}:user/floci`;
+
+      console.log(
+        `  ${green("✔")} Floci endpoint verified (local only): ${bold(endpoint)}`,
+      );
+      console.log(`  ${green("✔")} Account:  ${bold(accountId)}`);
+      console.log(`  ${green("✔")} Identity: ${bold(arn)}`);
+      return { accountId, userId, arn };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      printCredentialsError(`Cannot reach Floci at ${endpoint}: ${msg}`);
+      throw new Error(`Floci endpoint check failed: ${msg}`);
+    }
+  }
+
   if (profile) {
     process.env["AWS_PROFILE"] = profile;
   }

@@ -21,6 +21,7 @@ import {
 } from "@veolms/fleet-types";
 
 import { bold, cyan, green, yellow } from "@veolms/fleet-types/terminal";
+import { resolveFlociEndpoint } from "./floci.ts";
 
 export function resolveAwsRegion(options?: ProviderTriggerOptions): string {
   const args = [...process.argv.slice(2), ...(options?.rawArgs ?? [])];
@@ -206,8 +207,7 @@ export async function triggerTest(
 
   const region = resolveAwsRegion(options);
   const profile = resolveAwsProfile(options);
-  const endpointUrl =
-    process.env.AWS_ENDPOINT_URL || process.env.LOCALSTACK_ENDPOINT;
+  const endpointUrl = resolveFlociEndpoint();
   const { name: lambdaName, isDirectFleetManager } =
     resolveTargetLambda(options);
 

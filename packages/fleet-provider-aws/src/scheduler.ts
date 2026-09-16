@@ -9,6 +9,7 @@ import {
   type FlexibleTimeWindowMode,
 } from "@aws-sdk/client-scheduler";
 import { loadAwsProviderConfig } from "./config.ts";
+import { awsServiceClientOptions } from "./floci.ts";
 
 export const DEFAULT_SCHEDULE_NAME = "veolms-fleet-next-check";
 export const DEFAULT_SCHEDULER_ROLE_NAME = "VeoLMSSchedulerRole";
@@ -43,13 +44,10 @@ export function createAwsSchedulerManager(
   const envConfig = loadAwsProviderConfig(process.env);
   const region = config.region ?? envConfig.AWS_REGION;
   const scheduleName = config.scheduleName ?? DEFAULT_SCHEDULE_NAME;
-  const isLocalStack = Boolean(process.env.AWS_ENDPOINT_URL);
-
   const scheduler =
     config.schedulerClient ??
     new SchedulerClient({
-      region,
-      ...(isLocalStack ? { endpoint: process.env.AWS_ENDPOINT_URL } : {}),
+      ...awsServiceClientOptions(region),
     });
 
   const resolveTargetArn = (): string | null => {
@@ -69,14 +67,6 @@ export function createAwsSchedulerManager(
       targetTime: Date,
       payload: Readonly<Record<string, unknown>> = {},
     ): Promise<void> {
-      if (isLocalStack) {
-        console.info(
-          `[aws-scheduler] LocalStack detected: scheduled wakeup at ${targetTime.toISOString()} for payload:`,
-          JSON.stringify(payload),
-        );
-        return;
-      }
-
       const targetArn = resolveTargetArn();
       const roleArn = resolveRoleArn();
 
@@ -147,13 +137,6 @@ export function createAwsSchedulerManager(
     },
 
     async cancelWakeup(): Promise<void> {
-      if (isLocalStack) {
-        console.info(
-          `[aws-scheduler] LocalStack: cancelled wakeup schedule ${scheduleName}`,
-        );
-        return;
-      }
-
       try {
         await scheduler.send(
           new DeleteScheduleCommand({
@@ -179,8 +162,6 @@ export function createAwsSchedulerManager(
     },
 
     async getWakeupSchedule(): Promise<{ targetTime: Date } | null> {
-      if (isLocalStack) return null;
-
       try {
         const res = await scheduler.send(
           new GetScheduleCommand({

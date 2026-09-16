@@ -16,7 +16,8 @@
     "build:ami": "node --env-file-if-exists=../../apps/fleet-manager/.env src/setup/build-ami.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/**/*.test.ts",
-    "setup:cicd": "node --env-file-if-exists=../../apps/fleet-manager/.env iam/setup-cicd-iam.ts"
+    "setup:cicd": "node --env-file-if-exists=../../apps/fleet-manager/.env iam/setup-cicd-iam.ts",
+    "docker:clean": "node --env-file-if-exists=../../.env src/floci-docker.ts clean"
   },
   "devDependencies": {
     "esbuild": "^0.25.0"

@@ -144,3 +144,5 @@ export async function writeEnvFile(
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, lines.join("\n"), "utf-8");
 }
+
+export * from "./storage-setup.ts";

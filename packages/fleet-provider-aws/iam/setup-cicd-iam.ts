@@ -48,6 +48,74 @@ export interface SetupCicdResult {
   readonly secretAccessKey?: string;
 }
 
+export function buildCicdPolicyDocument(options: {
+  readonly bucketName: string;
+  readonly region: string;
+  readonly accountId: string;
+}): string {
+  const { bucketName, region, accountId } = options;
+  return JSON.stringify(
+    {
+      Version: "2012-10-17",
+      Statement: [
+        {
+          Sid: "S3BuildBucketUploadAndRead",
+          Effect: "Allow",
+          Action: [
+            "s3:PutObject",
+            "s3:GetObject",
+            "s3:DeleteObject",
+            "s3:DeleteObjectVersion",
+          ],
+          Resource: `arn:aws:s3:::${bucketName}/bundles/*`,
+        },
+        {
+          Sid: "S3BuildBucketListBundles",
+          Effect: "Allow",
+          Action: ["s3:ListBucket"],
+          Resource: `arn:aws:s3:::${bucketName}`,
+          Condition: {
+            StringLike: {
+              "s3:prefix": ["bundles/", "bundles/*"],
+            },
+          },
+        },
+        {
+          Sid: "LambdaFunctionCodeUpdate",
+          Effect: "Allow",
+          Action: [
+            "lambda:UpdateFunctionCode",
+            "lambda:GetFunction",
+            "lambda:GetFunctionConfiguration",
+            "lambda:PublishVersion",
+          ],
+          Resource: [
+            `arn:aws:lambda:${region}:${accountId}:function:veolms-fleet-manager`,
+            `arn:aws:lambda:${region}:${accountId}:function:veolms-video-metadata-probe`,
+          ],
+        },
+        {
+          Sid: "LambdaFunctionInvocation",
+          Effect: "Allow",
+          Action: ["lambda:InvokeFunction"],
+          Resource: [
+            `arn:aws:lambda:${region}:${accountId}:function:veolms-fleet-manager`,
+            `arn:aws:lambda:${region}:${accountId}:function:veolms-video-metadata-probe`,
+          ],
+        },
+        {
+          Sid: "CloudWatchLogsDescribe",
+          Effect: "Allow",
+          Action: ["logs:DescribeLogGroups"],
+          Resource: "*",
+        },
+      ],
+    },
+    null,
+    2,
+  );
+}
+
 export async function runSetupCicdIam(
   options?: SetupCicdOptions,
 ): Promise<SetupCicdResult> {
@@ -130,51 +198,11 @@ export async function runSetupCicdIam(
   }
 
   // 2. Build Policy Document
-  const policyDocument = JSON.stringify(
-    {
-      Version: "2012-10-17",
-      Statement: [
-        {
-          Sid: "S3BuildBucketUploadAndRead",
-          Effect: "Allow",
-          Action: [
-            "s3:PutObject",
-            "s3:GetObject",
-            "s3:DeleteObject",
-            "s3:DeleteObjectVersion",
-            "s3:HeadObject",
-            "s3:ListBucket",
-          ],
-          Resource: [
-            `arn:aws:s3:::${bucketName}`,
-            `arn:aws:s3:::${bucketName}/*`,
-          ],
-        },
-        {
-          Sid: "LambdaFunctionCodeUpdate",
-          Effect: "Allow",
-          Action: [
-            "lambda:UpdateFunctionCode",
-            "lambda:GetFunction",
-            "lambda:GetFunctionConfiguration",
-            "lambda:PublishVersion",
-          ],
-          Resource: [
-            `arn:aws:lambda:${region}:${accountId}:function:veolms-fleet-manager`,
-            `arn:aws:lambda:${region}:${accountId}:function:veolms-video-metadata-probe`,
-          ],
-        },
-        {
-          Sid: "CloudWatchLogsDescribe",
-          Effect: "Allow",
-          Action: ["logs:DescribeLogGroups"],
-          Resource: "*",
-        },
-      ],
-    },
-    null,
-    2,
-  );
+  const policyDocument = buildCicdPolicyDocument({
+    bucketName,
+    region,
+    accountId,
+  });
 
   const policyArn = `arn:aws:iam::${accountId}:policy/${policyName}`;
 

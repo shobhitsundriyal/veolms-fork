@@ -13,6 +13,23 @@
  * - CDN_PUBLIC_FOLDERS: comma-separated public R2 folders.
  * - CDN_PRIVATE_FOLDERS: comma-separated folders requiring veo_token.
  * - CORS_ORIGINS: comma-separated allowed browser origins, or *.
+ * - AVATAR_IMAGE_WIDTHS: comma-separated avatar widths allowed by the transform Worker.
+ * - THUMBNAIL_IMAGE_WIDTHS: comma-separated thumbnail widths allowed by the transform Worker.
+ * - IMAGE_TRANSFORM_WORKER_URL: absolute URL of the Photon image-transform Worker.
+ * - IMAGE_TRANSFORM_TOKEN: secret token sent only from this Worker to the image-transform Worker.
+ *
+ * Thumbnail objects use flat keys beneath their media UUID:
+ * - public|protected/thumbnails/{mediaId}/original.{extension}
+ * - public|protected/thumbnails/{mediaId}/full.webp
+ * - public|protected/thumbnails/{mediaId}/{width}.webp
+ *
+ * Profile avatar objects use flat per-user keys:
+ * - public/avatars/{userId}/original.{extension}
+ * - public/avatars/{userId}/{width}.webp
+ *
+ * Avatar variants use stable URLs but are deliberately bypassed in the
+ * Worker cache and returned with no-store so replacing the original cannot
+ * leave an old variant at the edge.
  *
  * API-side token variables:
  * - CDN_TOKEN_TTL_SECONDS: normal protected-media token lifetime.
@@ -29,6 +46,10 @@ const DEFAULT_PUBLIC_FOLDERS = [
   "course-videos",
 ];
 const DEFAULT_PRIVATE_FOLDERS = ["protected", "media", "transcoded"];
+const DEFAULT_AVATAR_IMAGE_WIDTHS = [45, 96, 160];
+const DEFAULT_THUMBNAIL_IMAGE_WIDTHS = [160, 240, 320, 480, 640, 960, 1280];
+const IMAGE_TRANSFORM_VARIANT_PATTERN =
+  /^(?:public|protected)\/(?:thumbnails|avatars)\/[A-Za-z0-9_-]{1,200}\/(?:full|[1-9]\d*)\.webp$/u;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
@@ -84,6 +105,17 @@ export default {
       }
     }
 
+    const imageVariantError = validateImageVariant(objectKey, env);
+    if (imageVariantError) {
+      return createErrorResponse(
+        request,
+        env,
+        imageVariantError.status,
+        imageVariantError.code,
+        imageVariantError.message,
+      );
+    }
+
     const rangeHeader = request.headers.get("Range");
     const hasConditionalHeaders = Boolean(
       request.headers.get("If-None-Match") ||
@@ -93,6 +125,7 @@ export default {
       method === "GET" &&
       !rangeHeader &&
       !hasConditionalHeaders &&
+      !isAvatarImageVariantKey(objectKey) &&
       isWildcardCors(env);
     const cacheKey = canUseSharedCache ? createCacheKey(request) : undefined;
 
@@ -108,6 +141,14 @@ export default {
     if (rangeHeader || method === "HEAD" || hasConditionalHeaders) {
       metadata = await env.MEDIA_BUCKET.head(objectKey);
       if (!metadata) {
+        const transformed = await fetchMissingImageVariant(
+          request,
+          env,
+          context,
+          objectKey,
+          cacheKey,
+        );
+        if (transformed) return transformed;
         return createErrorResponse(
           request,
           env,
@@ -157,6 +198,14 @@ export default {
     }
 
     if (!object) {
+      const transformed = await fetchMissingImageVariant(
+        request,
+        env,
+        context,
+        objectKey,
+        cacheKey,
+      );
+      if (transformed) return transformed;
       return createErrorResponse(request, env, 404, "NOT_FOUND", "Not found.");
     }
 
@@ -232,6 +281,187 @@ function getCdnPathPrefix(value) {
   }
 }
 
+function validateImageVariant(objectKey, env) {
+  const match =
+    /^(?:public|protected)\/(thumbnails|avatars)\/[A-Za-z0-9_-]{1,200}\/(full|[1-9]\d*)\.webp$/u.exec(
+      objectKey,
+    );
+  if (!match) return null;
+
+  const collection = match[1];
+  const filename = match[2];
+  if (collection === "avatars" && filename === "full") {
+    return {
+      status: 400,
+      code: "INVALID_PATH",
+      message: "Avatar full-size variants are not supported.",
+    };
+  }
+  if (filename === "full") return null;
+
+  let widths;
+  try {
+    widths = resolveConfiguredImageWidths(env);
+  } catch {
+    return {
+      status: 500,
+      code: "INVALID_CONFIGURATION",
+      message: "The image transform configuration is invalid.",
+    };
+  }
+
+  const width = Number(filename);
+  const allowedWidths =
+    collection === "thumbnails" ? widths.thumbnail : widths.avatar;
+  if (!allowedWidths.includes(width)) {
+    return {
+      status: 400,
+      code: "UNAVAILABLE_VARIANT",
+      message: "The requested image width is not enabled.",
+    };
+  }
+  return null;
+}
+
+function resolveConfiguredImageWidths(env) {
+  return {
+    avatar: parseConfiguredImageWidths(
+      env.AVATAR_IMAGE_WIDTHS,
+      DEFAULT_AVATAR_IMAGE_WIDTHS,
+      "AVATAR_IMAGE_WIDTHS",
+    ),
+    thumbnail: parseConfiguredImageWidths(
+      env.THUMBNAIL_IMAGE_WIDTHS,
+      DEFAULT_THUMBNAIL_IMAGE_WIDTHS,
+      "THUMBNAIL_IMAGE_WIDTHS",
+    ),
+  };
+}
+
+function parseConfiguredImageWidths(value, fallback, environmentName) {
+  const rawValue = String(value || "").trim();
+  if (!rawValue) return [...fallback];
+
+  const values = rawValue.split(",").map((item) => item.trim());
+  if (
+    values.some(
+      (item) => !/^[1-9]\d*$/.test(item) || !Number.isSafeInteger(Number(item)),
+    )
+  ) {
+    throw new Error(
+      `${environmentName} must be a comma-separated list of positive integers`,
+    );
+  }
+  return [...new Set(values.map(Number))].sort((left, right) => left - right);
+}
+
+async function fetchMissingImageVariant(
+  request,
+  env,
+  context,
+  objectKey,
+  cacheKey,
+) {
+  if (!IMAGE_TRANSFORM_VARIANT_PATTERN.test(objectKey)) return null;
+
+  const configuredUrl = String(env.IMAGE_TRANSFORM_WORKER_URL || "").trim();
+  const transformToken = String(env.IMAGE_TRANSFORM_TOKEN || "");
+  if (!configuredUrl || !transformToken) {
+    return createErrorResponse(
+      request,
+      env,
+      503,
+      "IMAGE_TRANSFORM_NOT_CONFIGURED",
+      "The image transform service is not configured.",
+    );
+  }
+
+  let transformUrl;
+  try {
+    transformUrl = new URL(configuredUrl);
+  } catch {
+    return createErrorResponse(
+      request,
+      env,
+      503,
+      "IMAGE_TRANSFORM_NOT_CONFIGURED",
+      "The image transform service URL is invalid.",
+    );
+  }
+
+  if (transformUrl.protocol !== "https:" && transformUrl.protocol !== "http:") {
+    return createErrorResponse(
+      request,
+      env,
+      503,
+      "IMAGE_TRANSFORM_NOT_CONFIGURED",
+      "The image transform service URL is invalid.",
+    );
+  }
+
+  if (transformUrl.origin === new URL(request.url).origin) {
+    return createErrorResponse(
+      request,
+      env,
+      503,
+      "IMAGE_TRANSFORM_NOT_CONFIGURED",
+      "The image transform service must use a different Worker endpoint.",
+    );
+  }
+
+  transformUrl.pathname = `/${objectKey}`;
+  transformUrl.search = "";
+  transformUrl.searchParams.set("token", transformToken);
+
+  const transformHeaders = new Headers(request.headers);
+  transformHeaders.delete("Cookie");
+  transformHeaders.delete("Range");
+  transformHeaders.delete("If-None-Match");
+  transformHeaders.delete("If-Modified-Since");
+
+  let response;
+  try {
+    response = await fetch(
+      new Request(transformUrl, {
+        method: request.method,
+        headers: transformHeaders,
+      }),
+    );
+  } catch (error) {
+    console.error("Image transform proxy failed", {
+      objectKey,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return createErrorResponse(
+      request,
+      env,
+      502,
+      "IMAGE_TRANSFORM_UNAVAILABLE",
+      "The image transform service is unavailable.",
+    );
+  }
+
+  const responseHeaders = new Headers(response.headers);
+  if (response.ok) {
+    responseHeaders.set("Cache-Control", cacheControlForKey(objectKey));
+  }
+  addCorsHeaders(responseHeaders, request, env);
+  responseHeaders.set("X-Content-Type-Options", "nosniff");
+  const proxiedResponse = new Response(
+    request.method === "HEAD" ? null : response.body,
+    {
+      status: response.status,
+      statusText: response.statusText,
+      headers: responseHeaders,
+    },
+  );
+
+  if (cacheKey && proxiedResponse.ok) {
+    context.waitUntil(caches.default.put(cacheKey, proxiedResponse.clone()));
+  }
+  return proxiedResponse;
+}
+
 function classifyObjectKey(objectKey, env) {
   if (MANIFEST_PATTERN.test(objectKey)) return "public";
 
@@ -262,6 +492,10 @@ function matchesFolder(objectKey, folders) {
   return folders.some(
     (folder) => objectKey === folder || objectKey.startsWith(`${folder}/`),
   );
+}
+
+function isAvatarImageVariantKey(objectKey) {
+  return /^(?:public|protected)\/avatars\//u.test(objectKey);
 }
 
 function normalizePathPrefix(value) {
@@ -455,6 +689,13 @@ function createObjectHeaders(request, env, objectKey, object, range, metadata) {
 }
 
 function cacheControlForKey(objectKey) {
+  if (IMAGE_TRANSFORM_VARIANT_PATTERN.test(objectKey)) {
+    if (/^(?:public|protected)\/thumbnails\//u.test(objectKey)) {
+      return "public, max-age=31536000, immutable";
+    }
+    if (isAvatarImageVariantKey(objectKey)) return "no-store";
+    return "public, max-age=300";
+  }
   if (MANIFEST_PATTERN.test(objectKey)) {
     return "public, max-age=60, s-maxage=60, stale-while-revalidate=300";
   }

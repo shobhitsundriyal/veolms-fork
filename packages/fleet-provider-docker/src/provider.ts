@@ -3,6 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { S3StorageService } from "@veolms/storage";
 import type {
   ActiveProviderInstance,
   ExecutionResult,
@@ -35,9 +36,15 @@ export interface DockerProviderConfig {
   readonly workerDatabaseUrl?: string;
   readonly defaultEnv?: Readonly<Record<string, string>>;
   readonly dockerCommand?: string;
-  /** Uses Docker Engine's Unix-socket API; required inside a LocalStack Lambda. */
+  /** Uses Docker Engine's Unix-socket API; required inside a Floci Lambda. */
   readonly transport?: "cli" | "socket";
   readonly socketPath?: string;
+  /** Optional storage adapter used to verify output stored outside the host mount. */
+  readonly storageVerifier?: StorageVerifier;
+}
+
+export interface StorageVerifier {
+  headObject(key: string): Promise<{ contentLength?: number } | null>;
 }
 
 interface DockerApiResponse {
@@ -153,14 +160,14 @@ function buildWorkerEnvironment(options: {
   return {
     ...options.defaultEnv,
     ...options.spec.environmentVariables,
-    ...(databaseUrl
-      ? { DATABASE_URL: databaseUrl }
-      : {}),
+    ...(databaseUrl ? { DATABASE_URL: databaseUrl } : {}),
     ...(process.env.STORAGE_PROVIDER
       ? { STORAGE_PROVIDER: process.env.STORAGE_PROVIDER }
       : {}),
     ...(process.env.S3_BUCKET ? { S3_BUCKET: process.env.S3_BUCKET } : {}),
-    ...(process.env.S3_ENDPOINT ? { S3_ENDPOINT: process.env.S3_ENDPOINT } : {}),
+    ...(process.env.S3_ENDPOINT
+      ? { S3_ENDPOINT: process.env.S3_ENDPOINT }
+      : {}),
     ...(process.env.S3_REGION ? { S3_REGION: process.env.S3_REGION } : {}),
     ...(process.env.S3_ACCESS_KEY_ID
       ? { S3_ACCESS_KEY_ID: process.env.S3_ACCESS_KEY_ID }
@@ -178,7 +185,39 @@ function buildWorkerEnvironment(options: {
   };
 }
 
-/** Docker Engine create payload used by the LocalStack Lambda fallback. */
+function createStorageVerifierFromEnvironment(): StorageVerifier | undefined {
+  if (process.env.STORAGE_PROVIDER?.trim().toLowerCase() !== "s3") {
+    return undefined;
+  }
+
+  const bucket = process.env.S3_BUCKET?.trim();
+  if (!bucket) return undefined;
+
+  const endpoint =
+    process.env.S3_ENDPOINT?.trim() ||
+    process.env.AWS_ENDPOINT_URL?.trim() ||
+    process.env.FLOCI_ENDPOINT?.trim();
+  const accessKeyId =
+    process.env.S3_ACCESS_KEY_ID?.trim() ||
+    process.env.AWS_ACCESS_KEY_ID?.trim();
+  const secretAccessKey =
+    process.env.S3_SECRET_ACCESS_KEY?.trim() ||
+    process.env.AWS_SECRET_ACCESS_KEY?.trim();
+
+  return new S3StorageService({
+    bucket,
+    endpoint,
+    region:
+      process.env.S3_REGION?.trim() ||
+      process.env.AWS_REGION?.trim() ||
+      "us-east-1",
+    accessKeyId,
+    secretAccessKey,
+    forcePathStyle: process.env.S3_FORCE_PATH_STYLE === "true",
+  });
+}
+
+/** Docker Engine create payload used by the Floci Lambda fallback. */
 export function buildDockerCreateRequest(options: {
   workerId: string;
   spec: WorkerSpec;
@@ -232,6 +271,8 @@ export function createDockerProvider(
     (process.platform === "win32"
       ? "//./pipe/docker_engine"
       : "/var/run/docker.sock");
+  const storageVerifier =
+    config.storageVerifier ?? createStorageVerifierFromEnvironment();
   const workers = new Map<string, DockerWorkerRecord>();
 
   const run = async (args: readonly string[]) =>
@@ -536,7 +577,7 @@ export function createDockerProvider(
               .filter(Boolean);
       // A long-lived serverful manager knows the containers it created. Keep
       // those records visible when a nested Docker socket cannot enumerate
-      // them (a common Desktop/LocalStack topology); normal DB heartbeats and
+      // them (a common Desktop/Floci topology); normal DB heartbeats and
       // termination still reconcile a genuinely dead worker.
       const ids = new Set(discoveredIds);
       if (transport === "socket") {
@@ -567,9 +608,23 @@ export function createDockerProvider(
       outputPrefix: string,
       _qualities?: readonly VideoQualityLevel[],
     ): Promise<boolean> {
-      const { stat } = await import("node:fs/promises");
       const cleanPrefix = outputPrefix.replace(/^[/\\]+/, "");
-      const strippedPrefix = cleanPrefix.replace(/^s3-bucket[/\\]/, "");
+      const normalizedPrefix = cleanPrefix.replace(/^s3-bucket[/\\]/, "");
+      const masterKey = normalizedPrefix.endsWith("/")
+        ? `${normalizedPrefix}master.m3u8`
+        : `${normalizedPrefix}/master.m3u8`;
+
+      if (storageVerifier) {
+        try {
+          const head = await storageVerifier.headObject(masterKey);
+          return (head?.contentLength ?? 0) > 0;
+        } catch {
+          return false;
+        }
+      }
+
+      const { stat } = await import("node:fs/promises");
+      const strippedPrefix = normalizedPrefix;
 
       const candidateDirs = [
         join(verificationStorageRoot, strippedPrefix),
