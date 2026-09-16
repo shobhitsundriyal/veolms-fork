@@ -62,9 +62,9 @@ const baseMediaWorkerConfigSchema = z.object({
   S3_SECRET_ACCESS_KEY: z.string().optional(),
   AWS_REGION: z.string().optional(),
   S3_FORCE_PATH_STYLE: z
-    .enum(["true", "false"])
+    .union([z.boolean(), z.enum(["true", "false"])])
     .optional()
-    .transform((val) => val === "true"),
+    .transform((val) => val === true || val === "true"),
   SCRATCH_DIR: z.string().default("/tmp/veolms-worker"),
   HEARTBEAT_INTERVAL_MS: z.coerce.number().int().min(1000).default(15000),
   HEARTBEAT_DRAIN_TIMEOUT_MS: z.coerce.number().int().min(0).default(5000),
@@ -132,17 +132,26 @@ export function loadMediaWorkerConfig(
     // aliases are present so a stale generated S3_BUCKET cannot override the
     // bucket used by the API (for example during local R2 development).
     S3_BUCKET: env["STORAGE_BUCKET"] || env["S3_BUCKET"] || "veolms-media",
-    S3_ENDPOINT: env["STORAGE_ENDPOINT"] || env["S3_ENDPOINT"] || undefined,
+    S3_ENDPOINT:
+      env["STORAGE_ENDPOINT"] ||
+      env["S3_ENDPOINT"] ||
+      env["AWS_ENDPOINT_URL"] ||
+      env["FLOCI_ENDPOINT"] ||
+      undefined,
     S3_REGION:
       env["STORAGE_REGION"] ||
       env["S3_REGION"] ||
       env["AWS_REGION"] ||
       "us-east-1",
     S3_ACCESS_KEY_ID:
-      env["STORAGE_ACCESS_KEY_ID"] || env["S3_ACCESS_KEY_ID"] || undefined,
+      env["STORAGE_ACCESS_KEY_ID"] ||
+      env["S3_ACCESS_KEY_ID"] ||
+      env["AWS_ACCESS_KEY_ID"] ||
+      undefined,
     S3_SECRET_ACCESS_KEY:
       env["STORAGE_SECRET_ACCESS_KEY"] ||
       env["S3_SECRET_ACCESS_KEY"] ||
+      env["AWS_SECRET_ACCESS_KEY"] ||
       undefined,
   };
   const parsed = mediaWorkerConfigSchema.parse(resolvedEnv);

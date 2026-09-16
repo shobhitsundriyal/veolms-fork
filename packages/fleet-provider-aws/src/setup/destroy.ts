@@ -1,11 +1,10 @@
-import { execSync } from "node:child_process";
 import * as readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import {
   bold,
   cyan,
   dim,
-  execCommand as exec,
+  execCommand as executeAwsCommand,
   green,
   red,
   yellow,
@@ -16,6 +15,7 @@ import {
   type ProviderDestroyResult,
 } from "@veolms/fleet-types";
 import { resolveS3BucketName, resolveS3BuildBucketName } from "../config.ts";
+import { resolveFlociEndpoint } from "../floci.ts";
 import { isNonInteractive } from "./common.ts";
 
 const ROLE_NAME = "VeoLMSWorkerRole";
@@ -31,12 +31,27 @@ export interface DestroyOptions {
   readonly nonInteractive?: boolean;
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function withAwsEndpoint(command: string, endpointUrl: string | null): string {
+  if (!endpointUrl) return command;
+  const endpointArg = `--endpoint-url ${shellQuote(endpointUrl)}`;
+  const redirectIndex = command.indexOf(" 2>/dev/null");
+  if (redirectIndex < 0) return `${command} ${endpointArg}`;
+  return `${command.slice(0, redirectIndex)} ${endpointArg}${command.slice(redirectIndex)}`;
+}
+
 async function destroyS3Bucket(
   rl: readline.Interface,
   bucketName: string,
   region: string,
+  endpointUrl: string | null,
 ): Promise<void> {
   console.info(`\n[6/6] Checking S3 bucket ${bold(bucketName)}...`);
+  const exec = (command: string) =>
+    executeAwsCommand(withAwsEndpoint(command, endpointUrl));
 
   const exists =
     exec(
@@ -47,11 +62,11 @@ async function destroyS3Bucket(
     return;
   }
 
-  // `KeyCount` is unreliable here — LocalStack's list-objects-v2 response
+  // `KeyCount` is unreliable across AWS-compatible emulators
   // omits the field entirely (returns "None"), which would silently read as
   // zero objects and skip the confirmation prompt below even when the
   // bucket holds real data. Counting `Contents` directly works identically
-  // against real AWS and LocalStack.
+  // against real AWS and Floci.
   // We use JSON output to avoid shell quoting and escaping differences across platforms.
   let objectCount = 0;
   const countRaw = exec(
@@ -119,7 +134,7 @@ export async function runAwsInfraDestroy(
   const endpointUrl =
     options.endpointUrl !== undefined
       ? options.endpointUrl
-      : process.env.AWS_ENDPOINT_URL || null;
+      : (resolveFlociEndpoint() ?? null);
   const s3BucketName =
     options.s3BucketName !== undefined
       ? options.s3BucketName
@@ -136,7 +151,7 @@ ${bold(red("╚═════════════════════�
 `);
 
   console.info(
-    `Target: ${bold(cyan(endpointUrl ? `LocalStack @ ${endpointUrl}` : "Real AWS"))}`,
+    `Target: ${bold(cyan(endpointUrl ? `Floci @ ${endpointUrl}` : "Real AWS"))}`,
   );
   console.info(`Region: ${bold(cyan(region))}\n`);
 
@@ -167,6 +182,8 @@ async function runDestroySteps(
   },
 ): Promise<void> {
   const { region, s3BucketName, s3BuildBucket } = config;
+  const exec = (command: string) =>
+    executeAwsCommand(withAwsEndpoint(command, config.endpointUrl));
 
   // 1. Terminate any running EC2 instances
   console.info("[1/6] Terminating active EC2 worker instances...");
@@ -348,7 +365,7 @@ async function runDestroySteps(
 
   // 8. Delete S3 bucket(s) — asks for confirmation if it still holds data
   if (s3BucketName) {
-    await destroyS3Bucket(rl, s3BucketName, region);
+    await destroyS3Bucket(rl, s3BucketName, region, config.endpointUrl);
   } else {
     console.info(
       `\n[8/8] No S3_BUCKET configured — skipping S3 media bucket cleanup.`,
@@ -359,7 +376,7 @@ async function runDestroySteps(
     console.info(
       `\nChecking dedicated S3 build bucket ${bold(s3BuildBucket)}...`,
     );
-    await destroyS3Bucket(rl, s3BuildBucket, region);
+    await destroyS3Bucket(rl, s3BuildBucket, region, config.endpointUrl);
   }
 
   console.info(`

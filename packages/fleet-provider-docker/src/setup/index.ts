@@ -46,6 +46,7 @@ import {
   readExistingEnv,
   resolveRepoRoot as findRepoRoot,
   writeEnvFile as baseWriteEnvFile,
+  promptStorageConfig,
 } from "@veolms/fleet-types/env";
 import { isMainModule } from "@veolms/fleet-types";
 
@@ -100,7 +101,9 @@ export async function configureEnv(
   options: ProviderConfigOptions & { rl?: readline.Interface } = {},
 ): Promise<ProviderConfigResult> {
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
-  const repoRoot = findRepoRoot(__dirname);
+  const repoRoot = options.cwd
+    ? path.resolve(options.cwd)
+    : findRepoRoot(__dirname);
   const nonInteractive = isNonInteractive(options);
   const shouldCloseRl =
     !isReadlineInterface(options.rl) && !nonInteractive && process.stdin.isTTY;
@@ -255,8 +258,7 @@ ${bold(cyan("╚═════════════════════�
         value: "cli" as const,
       },
       {
-        label:
-          "Docker Engine Unix Socket (Required inside container/LocalStack)",
+        label: "Docker Engine Unix Socket (Required inside container/Floci)",
         value: "socket" as const,
       },
     ];
@@ -269,11 +271,22 @@ ${bold(cyan("╚═════════════════════�
       nonInteractive,
     );
 
+    const storageResult = await promptStorageConfig({
+      rl,
+      provider: "docker",
+      existingEnv: {
+        ...rootEnv,
+        ...existingWorkerEnv,
+        ...existingFleetEnv,
+        ...options.env,
+      },
+      nonInteractive,
+    });
+
     const fleetEnv: Record<string, string> = {
       FLEET_PROVIDER: "docker",
       PROVIDER: "docker",
       FLEET_MODE: "serverful",
-      STORAGE_PROVIDER: "local",
       DOCKER_WORKER_IMAGE: workerImage,
       DOCKER_NETWORK: dockerNetwork,
       DOCKER_TRANSPORT: dockerTransport,
@@ -285,14 +298,15 @@ ${bold(cyan("╚═════════════════════�
       MAX_WORKERS: maxWorkers,
       FLEET_TEST_MODE: "true",
       ...(socketGid ? { DOCKER_SOCKET_GID: socketGid } : {}),
+      ...storageResult.envVars,
     };
 
     const workerEnv: Record<string, string> = {
       FLEET_PROVIDER: "docker",
-      STORAGE_PROVIDER: "local",
       LOCAL_STORAGE_ROOT: "/app/s3-bucket",
       DATABASE_URL: databaseUrl,
       WORKER_IDLE_POLL_SECONDS: idlePollSec,
+      ...storageResult.envVars,
     };
 
     await writeEnvFile(fleetEnvPath, fleetEnv);
@@ -307,6 +321,8 @@ ${bold(cyan("╚═════════════════════�
         dockerNetwork,
         localStorageRoot,
         dockerTransport,
+        storageProvider: storageResult.storageProvider,
+        ...storageResult.envVars,
       },
     };
   } finally {

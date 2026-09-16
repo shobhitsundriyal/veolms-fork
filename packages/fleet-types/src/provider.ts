@@ -56,6 +56,7 @@ export interface ProviderConfigResult {
   envFiles: readonly string[];
   provider: string;
   config?: Record<string, unknown>;
+  details?: Record<string, unknown>;
 }
 
 export interface ProviderInfraOptions {

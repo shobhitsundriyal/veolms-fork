@@ -9,3 +9,4 @@ export * from "./entrypoint.ts";
 export * from "./terminal.ts";
 export * from "./zip.ts";
 export * from "./env.ts";
+export * from "./storage-setup.ts";
