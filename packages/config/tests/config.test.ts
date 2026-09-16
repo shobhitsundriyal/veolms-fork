@@ -23,6 +23,8 @@ describe("packages/config", () => {
       assert.equal(config.RP_ID, "localhost");
       assert.ok(config.WEBAUTHN_ORIGINS.includes("http://localhost:3000"));
       assert.ok(config.WEBAUTHN_ORIGINS.includes("http://127.0.0.1:3000"));
+      assert.ok(config.WEBAUTHN_ORIGINS.includes("http://localhost:4173"));
+      assert.ok(config.WEBAUTHN_ORIGINS.includes("http://127.0.0.1:4173"));
       assert.ok(config.WEBAUTHN_RP_IDS.includes("localhost"));
     });
 
