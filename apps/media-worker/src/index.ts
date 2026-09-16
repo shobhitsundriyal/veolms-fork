@@ -1,9 +1,9 @@
-import { resolve } from "node:path";
-import { createDatabase } from "@veolms/database";
+import { claimNextQueuedImageJob, createDatabase } from "@veolms/database";
 import { isMainModule } from "@veolms/fleet-types";
 import { loadMediaWorkerConfig } from "@veolms/config";
 import { executeTranscodeJob } from "./processor.ts";
 import { initMediaWorker, pollForNextJob } from "./worker.ts";
+import { processImageJob } from "./image-processor.ts";
 
 export async function run(): Promise<void> {
   const config = loadMediaWorkerConfig();
@@ -27,6 +27,23 @@ export async function run(): Promise<void> {
   process.on("SIGINT", cleanup);
 
   try {
+    if (config.IMAGE_WORKER_MODE) {
+      let processed = 0;
+      while (!shutdownController.signal.aborted && processed < config.WORKER_MAX_JOBS) {
+        const imageJob = await claimNextQueuedImageJob(db);
+        if (imageJob) {
+          try {
+            await processImageJob({ db, config, jobId: imageJob.id, mediaId: imageJob.media_id });
+            processed++;
+          } catch (error) {
+            console.error(`[media-worker] Image job ${imageJob.id} failed:`, error);
+          }
+          continue;
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, config.IMAGE_WORKER_POLL_MS));
+      }
+      return;
+    }
     let jobId =
       config.JOB_ID ??
       (await pollForNextJob(workerCtx, shutdownController.signal));

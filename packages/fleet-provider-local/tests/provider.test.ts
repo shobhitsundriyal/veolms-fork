@@ -1,9 +1,49 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLocalProvider, parsePidFromWorkerId } from "../src/provider.ts";
+
+function createMockRl(responses: string[], secret: string) {
+  const input = new EventEmitter() as EventEmitter & {
+    isTTY: boolean;
+    isRaw: boolean;
+    isPaused: () => boolean;
+    setRawMode: (mode: boolean) => EventEmitter;
+  };
+  let paused = false;
+  input.isTTY = true;
+  input.isRaw = false;
+  input.isPaused = () => paused;
+  input.pause = () => {
+    paused = true;
+    return input;
+  };
+  input.resume = () => {
+    paused = false;
+    return input;
+  };
+  input.setRawMode = (mode: boolean) => {
+    input.isRaw = mode;
+    return input;
+  };
+  const originalOn = input.on.bind(input);
+  input.on = ((event: string, listener: (...args: any[]) => void) => {
+    const result = originalOn(event, listener);
+    if (event === "data") {
+      queueMicrotask(() => input.emit("data", `${secret}\r\n`));
+    }
+    return result;
+  }) as typeof input.on;
+  const output = { write: () => true };
+  return {
+    question: async () => responses.shift() ?? "",
+    input,
+    output,
+  } as any;
+}
 
 describe("Local Fleet Provider", () => {
   it("should parse PID from worker provider ID", () => {
@@ -116,6 +156,95 @@ describe("Local Fleet Provider", () => {
       assert.equal(worker?.status, "completed");
     } finally {
       await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("exports lifecycle setup modules and supports configureEnv with local storage", async () => {
+    const { configureEnv, provisionInfra } =
+      await import("../src/setup/index.ts");
+    assert.equal(typeof configureEnv, "function");
+    assert.equal(typeof provisionInfra, "function");
+
+    const responses = [
+      "postgresql://test:test@localhost:5432/test", // db url
+      "1", // local storage
+    ];
+    const mockRl = createMockRl(responses, "");
+
+    const tempDir = await mkdtemp(join(tmpdir(), "veolms-local-env-test-"));
+    try {
+      const res = await configureEnv({
+        cwd: tempDir,
+        rl: mockRl,
+        nonInteractive: false,
+      });
+      assert.equal(res.provider, "local");
+      assert.equal(res.details?.storageProvider, "local");
+      assert.equal(res.envFiles.length, 2);
+      assert.ok(res.envFiles.every((file) => file.startsWith(tempDir)));
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("supports configureEnv with s3 storage for local provider", async () => {
+    const { configureEnv } = await import("../src/setup/index.ts");
+    const responses = [
+      "postgresql://test:test@localhost:5432/test", // db url
+      "2", // s3 storage
+      "local-minio-bucket", // bucket
+      "http://localhost:9000", // endpoint
+      "us-east-1", // region
+      "minioadmin", // access key
+      "1", // path style: true
+    ];
+    const mockRl = createMockRl(responses, "miniopassword");
+
+    const tempDir = await mkdtemp(join(tmpdir(), "veolms-local-env-test-"));
+    try {
+      const res = await configureEnv({
+        cwd: tempDir,
+        rl: mockRl,
+        nonInteractive: false,
+      });
+      assert.equal(res.provider, "local");
+      assert.equal(res.details?.storageProvider, "s3");
+      assert.equal(res.details?.S3_BUCKET, "local-minio-bucket");
+      assert.equal(res.details?.S3_ENDPOINT, "http://localhost:9000");
+      assert.ok(res.envFiles.every((file) => file.startsWith(tempDir)));
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses ProviderConfigOptions.env as the storage default without writing the real checkout", async () => {
+    const { configureEnv } = await import("../src/setup/index.ts");
+    const responses = ["postgresql://test:test@localhost:5432/test", ""];
+    const mockRl = createMockRl(responses, "");
+    const tempDir = await mkdtemp(join(tmpdir(), "veolms-local-env-test-"));
+
+    try {
+      const res = await configureEnv({
+        cwd: tempDir,
+        env: {
+          STORAGE_PROVIDER: "s3",
+          S3_BUCKET: "options-bucket",
+          S3_ENDPOINT: "http://options-minio:9000",
+          S3_REGION: "eu-west-1",
+          S3_ACCESS_KEY_ID: "options-key",
+          S3_SECRET_ACCESS_KEY: "options-secret",
+          S3_FORCE_PATH_STYLE: "true",
+        },
+        rl: mockRl,
+        nonInteractive: false,
+      });
+
+      assert.equal(res.details?.storageProvider, "s3");
+      assert.equal(res.details?.S3_BUCKET, "options-bucket");
+      assert.equal(res.details?.S3_ENDPOINT, "http://options-minio:9000");
+      assert.ok(res.envFiles.every((file) => file.startsWith(tempDir)));
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
     }
   });
 });

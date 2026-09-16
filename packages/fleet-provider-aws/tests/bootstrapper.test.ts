@@ -2,13 +2,14 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   encodeUserDataBase64,
-  generateLocalStackUserDataScript,
   generateUserDataScript,
+  PINNED_FFMPEG_SHA256,
+  PINNED_FFMPEG_VERSION,
 } from "../src/bootstrapper.ts";
 
 describe("EC2 UserData Bootstrapper Generator", () => {
-  it("generates a local-only bootstrap script for a prebuilt LocalStack AMI", () => {
-    const script = generateLocalStackUserDataScript({
+  it("uses the standard bootstrap script for a Floci Docker-backed EC2 instance", () => {
+    const script = generateUserDataScript({
       workerId: "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
       spec: {
         cpu: 2,
@@ -18,13 +19,33 @@ describe("EC2 UserData Bootstrapper Generator", () => {
         region: "us-east-1",
         environmentVariables: { DATABASE_URL: "postgresql://db/veolms" },
       },
-      extraEnv: { LOCAL_STORAGE_ROOT: "/app/s3-bucket" },
+      extraEnv: {
+        AWS_ENDPOINT_URL: "http://floci:4566",
+        S3_ENDPOINT: "http://floci:4566",
+        S3_BUCKET: "veolms-floci-test",
+      },
     });
 
-    assert.ok(script.includes("exec node /opt/veolms/worker.js"));
-    assert.ok(script.includes('LOCAL_STORAGE_ROOT="/app/s3-bucket"'));
-    assert.ok(!script.includes("apt-get install"));
-    assert.ok(!script.includes("aws s3 cp"));
+    assert.ok(script.includes("node worker.js"));
+    assert.ok(script.includes('AWS_ENDPOINT_URL="http://floci:4566"'));
+    assert.ok(script.includes('S3_ENDPOINT="http://floci:4566"'));
+    assert.ok(script.includes('S3_BUCKET="veolms-floci-test"'));
+    assert.ok(script.includes("apt-get install"));
+    assert.ok(script.includes("wait_for_apt_locks"));
+    assert.ok(script.includes("after 300s"));
+    assert.ok(script.includes("aws s3 cp"));
+    assert.ok(script.includes("install_static_ffmpeg"));
+    assert.ok(
+      script.includes(
+        "https://johnvansickle.com/ffmpeg/old-releases/ffmpeg-${ffmpeg_version}-${ffmpeg_arch}-static.tar.xz",
+      ),
+    );
+    assert.ok(
+      script.includes(`local ffmpeg_version="${PINNED_FFMPEG_VERSION}"`),
+    );
+    assert.ok(script.includes("sha256sum"));
+    assert.ok(script.includes(PINNED_FFMPEG_SHA256.arm64));
+    assert.ok(!script.includes(".md5"));
   });
   it("should generate a bootstrapper script with environment variables and install-if-missing checks", () => {
     const script = generateUserDataScript({
@@ -49,8 +70,26 @@ describe("EC2 UserData Bootstrapper Generator", () => {
     assert.ok(script.includes('JOB_ID="job-123"'));
     assert.ok(script.includes("apt-get install"));
     assert.ok(script.includes("ffmpeg"));
+    assert.ok(script.includes("xz-utils"));
+    assert.ok(
+      !script.includes(
+        "apt_install_with_retry curl ca-certificates gnupg unzip ffmpeg",
+      ),
+    );
     assert.ok(script.includes("if ! command -v node"));
     assert.ok(script.includes("awscli"));
+    assert.ok(script.includes('if [ "${IMAGE_WORKER_MODE:-false}" = "true" ]'));
+    assert.ok(
+      script.includes(
+        "npm install --prefix /opt/veolms --no-save --no-package-lock",
+      ),
+    );
+    assert.ok(
+      script.includes(
+        '--omit=dev --include=optional --os=linux --cpu="$SHARP_CPU" sharp@0.34.5',
+      ),
+    );
+    assert.ok(script.includes("node -e 'require(\"sharp\")'"));
   });
 
   it("always installs a trap-based cleanup that uploads the log and terminates on any exit", () => {

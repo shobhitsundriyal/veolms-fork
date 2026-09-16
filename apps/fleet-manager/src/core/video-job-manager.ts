@@ -876,12 +876,13 @@ export function createJobManager(options: {
             endpoint:
               process.env.S3_ENDPOINT ||
               process.env.AWS_ENDPOINT_URL ||
-              process.env.LOCALSTACK_ENDPOINT,
+              process.env.FLOCI_ENDPOINT,
             accessKeyId: process.env.S3_ACCESS_KEY_ID,
             secretAccessKey: process.env.S3_SECRET_ACCESS_KEY,
             forcePathStyle:
               process.env.S3_FORCE_PATH_STYLE === "true" ||
-              Boolean(process.env.AWS_ENDPOINT_URL),
+              Boolean(process.env.AWS_ENDPOINT_URL) ||
+              Boolean(process.env.FLOCI_ENDPOINT),
           });
 
         try {

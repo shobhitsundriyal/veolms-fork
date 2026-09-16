@@ -5,6 +5,7 @@ export const mediaAssetTypeSchema = z.enum(["image", "video", "document"]);
 export const mediaAssetStatusSchema = z.enum([
   "uploading",
   "uploaded",
+  "processing",
   "ready",
   "failed",
 ]);
@@ -115,6 +116,7 @@ export const mediaAssetSchema = z.object({
   sizeBytes: z.coerce.number().int().nonnegative(),
   width: z.number().int().positive().nullable().optional(),
   height: z.number().int().positive().nullable().optional(),
+  metadata: z.record(z.string(), z.unknown()).nullable().optional(),
   durationSeconds: z.number().int().positive().nullable().optional(),
   status: mediaAssetStatusSchema,
   createdAt: z.string(),
@@ -127,6 +129,7 @@ export const presignMediaRequestSchema = z
     contentType: z.string().min(1),
     fileSize: z.number().int().positive(),
     type: mediaAssetTypeSchema,
+    visibility: z.enum(["public", "protected"]).default("protected"),
   })
   .refine((data) => data.fileSize <= MEDIA_MAX_SIZES[data.type], {
     message: "File size exceeds maximum allowed for this media type",
@@ -136,6 +139,17 @@ export const presignMediaRequestSchema = z
 export const presignMediaResponseSchema = z.object({
   uploadUrl: z.url(),
   mediaAssetId: z.uuid(),
+});
+
+export const mediaUploadCompleteResponseSchema = z.object({
+  status: mediaAssetStatusSchema,
+  deliveryUrl: z.string().min(1).optional(),
+  deliveryUrlExpiresAt: z.number().int().positive().optional(),
+});
+
+export const mediaDeliveryResponseSchema = z.object({
+  url: z.string().min(1),
+  expiresAt: z.number().int().positive().optional(),
 });
 
 export const videoJobProgressResponseSchema = z.object({
@@ -192,6 +206,10 @@ export type MediaAssetStatus = z.infer<typeof mediaAssetStatusSchema>;
 export type MediaAsset = z.infer<typeof mediaAssetSchema>;
 export type PresignMediaRequest = z.infer<typeof presignMediaRequestSchema>;
 export type PresignMediaResponse = z.infer<typeof presignMediaResponseSchema>;
+export type MediaUploadCompleteResponse = z.infer<
+  typeof mediaUploadCompleteResponseSchema
+>;
+export type MediaDeliveryResponse = z.infer<typeof mediaDeliveryResponseSchema>;
 export type VideoJobProgressResponse = z.infer<
   typeof videoJobProgressResponseSchema
 >;
@@ -203,6 +221,12 @@ export type LambdaResponse = z.infer<typeof lambdaResponseSchema>;
 z.globalRegistry.add(mediaAssetSchema, { id: "MediaAsset" });
 z.globalRegistry.add(presignMediaResponseSchema, {
   id: "PresignMediaResponse",
+});
+z.globalRegistry.add(mediaUploadCompleteResponseSchema, {
+  id: "MediaUploadCompleteResponse",
+});
+z.globalRegistry.add(mediaDeliveryResponseSchema, {
+  id: "MediaDeliveryResponse",
 });
 z.globalRegistry.add(videoJobProgressResponseSchema, {
   id: "VideoJobProgressResponse",

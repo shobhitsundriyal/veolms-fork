@@ -13,6 +13,7 @@
  *  - IAM Role + Instance Profile for EC2 workers
  *  - (Optional) Lambda function + CloudWatch log group (serverless mode)
  *  - (Optional) S3 bucket permission on EC2 role
+ *  - S3 raw-video notification → metadata probe Lambda
  *  - CloudWatch log groups for worker and fleet logs
  *  - Per-app .env files: apps/fleet-manager/.env + apps/media-worker/.env
  */
@@ -26,7 +27,18 @@ import * as path from "node:path";
 import { execSync, execFileSync } from "node:child_process";
 import * as esbuild from "esbuild";
 import { resolveS3BucketName, resolveS3BuildBucketName } from "../config.ts";
-import { LOCALSTACK_DOCKER_AMI_ID } from "../localstack-constants.ts";
+import {
+  DEFAULT_FLOCI_ENDPOINT,
+  DEFAULT_FLOCI_DATABASE_URL,
+  DEFAULT_FLOCI_HOST_DATABASE_URL,
+  FLOCI_DEFAULT_AMI_ID,
+  awsCliEndpointArgs,
+  awsS3ClientOptions,
+  awsServiceClientOptions,
+  resolveFlociContainerDatabaseUrl,
+  resolveFlociEndpoint,
+} from "../floci.ts";
+import { ensureFlociDocker } from "../floci-docker.ts";
 
 import {
   IAMClient,
@@ -56,6 +68,7 @@ import {
   Architecture,
   UpdateFunctionCodeCommand,
   UpdateFunctionConfigurationCommand,
+  AddPermissionCommand,
 } from "@aws-sdk/client-lambda";
 import {
   CloudWatchLogsClient,
@@ -73,6 +86,10 @@ import {
   PutPublicAccessBlockCommand,
   PutBucketPolicyCommand,
   PutBucketCorsCommand,
+  GetBucketNotificationConfigurationCommand,
+  PutBucketNotificationConfigurationCommand,
+  Event,
+  type LambdaFunctionConfiguration,
   type BucketLocationConstraint,
 } from "@aws-sdk/client-s3";
 import {
@@ -101,6 +118,7 @@ import {
 
 import {
   isMainModule,
+  promptStorageConfig,
   type ProviderConfigOptions,
   type ProviderConfigResult,
   type ProviderInfraOptions,
@@ -135,14 +153,132 @@ const LOG_GROUP_PROBE = "/aws/lambda/veolms-video-metadata-probe";
 const LOG_RETENTION_DAYS = 30;
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type TargetEnv = "aws" | "localstack";
+type TargetEnv = "aws" | "floci";
 type FleetMode = "serverless" | "serverful";
-type StorageProvider = "s3" | "other";
+type StorageProvider = "s3" | "local";
 type CredentialMode = "automatic" | "manual";
 type BootMode = "fresh" | "ami";
 type PricingModel = "spot" | "on-demand";
 
-const DEFAULT_LOCALSTACK_ENDPOINT = "http://localhost.localstack.cloud:4566";
+function createIamClient(region: string): IAMClient {
+  return new IAMClient(awsServiceClientOptions(region));
+}
+
+function createEc2Client(region: string): EC2Client {
+  return new EC2Client(awsServiceClientOptions(region));
+}
+
+function createLambdaClient(region: string): LambdaClient {
+  return new LambdaClient(awsServiceClientOptions(region));
+}
+
+function createCloudWatchLogsClient(region: string): CloudWatchLogsClient {
+  return new CloudWatchLogsClient(awsServiceClientOptions(region));
+}
+
+function createS3Client(region: string): S3Client {
+  const endpoint = resolveFlociEndpoint();
+  if (endpoint) return new S3Client(awsS3ClientOptions(region));
+
+  const s3Endpoint = process.env["S3_ENDPOINT"]?.trim();
+  return new S3Client({
+    region: process.env["S3_REGION"] || region,
+    ...(s3Endpoint
+      ? {
+          endpoint: s3Endpoint,
+          forcePathStyle: process.env["S3_FORCE_PATH_STYLE"] === "true",
+        }
+      : {}),
+  });
+}
+
+const RAW_VIDEO_TRIGGER_ID = "veolms-raw-video-probe";
+
+/**
+ * Connect raw MP4 uploads to the metadata probe. The probe already accepts
+ * the native S3 Event Notification shape and forwards a metadata-enriched
+ * claim to the Fleet Manager Lambda.
+ *
+ * Keep this notification scoped to raw/ so HLS outputs and other generated
+ * objects cannot recursively enqueue new jobs. API-managed uploads continue
+ * to use the upload-confirm dispatch path, which has the media record's
+ * canonical output prefix.
+ */
+async function ensureRawVideoS3Trigger(options: {
+  readonly accountId: string;
+  readonly bucketName: string;
+  readonly lambda: LambdaClient;
+  readonly probeLambdaArn: string;
+  readonly region: string;
+  readonly s3: S3Client;
+}): Promise<void> {
+  const { accountId, bucketName, lambda, probeLambdaArn, region, s3 } = options;
+
+  const sourceArn = `arn:aws:s3:::${bucketName}`;
+
+  try {
+    await lambda.send(
+      new AddPermissionCommand({
+        Action: "lambda:InvokeFunction",
+        FunctionName: PROBE_LAMBDA_FUNCTION_NAME,
+        Principal: "s3.amazonaws.com",
+        SourceAccount: accountId,
+        SourceArn: sourceArn,
+        StatementId: RAW_VIDEO_TRIGGER_ID,
+      }),
+    );
+  } catch (err: unknown) {
+    const name = err instanceof Error ? err.name : "";
+    const message = err instanceof Error ? err.message : String(err);
+    if (
+      !name.includes("ResourceConflict") &&
+      !message.toLowerCase().includes("already exists") &&
+      !message.toLowerCase().includes("statement id")
+    ) {
+      throw err;
+    }
+  }
+
+  const existing = await s3.send(
+    new GetBucketNotificationConfigurationCommand({ Bucket: bucketName }),
+  );
+  const existingLambdaConfigurations = (
+    existing.LambdaFunctionConfigurations ?? []
+  ).filter((configuration) => configuration.Id !== RAW_VIDEO_TRIGGER_ID);
+
+  const rawVideoConfiguration: LambdaFunctionConfiguration = {
+    Events: [Event.s3_ObjectCreated_],
+    Filter: {
+      Key: {
+        FilterRules: [
+          { Name: "prefix", Value: "raw/" },
+          { Name: "suffix", Value: ".mp4" },
+        ],
+      },
+    },
+    Id: RAW_VIDEO_TRIGGER_ID,
+    LambdaFunctionArn: probeLambdaArn,
+  };
+
+  await s3.send(
+    new PutBucketNotificationConfigurationCommand({
+      Bucket: bucketName,
+      NotificationConfiguration: {
+        EventBridgeConfiguration: existing.EventBridgeConfiguration,
+        LambdaFunctionConfigurations: [
+          ...existingLambdaConfigurations,
+          rawVideoConfiguration,
+        ],
+        QueueConfigurations: existing.QueueConfigurations,
+        TopicConfigurations: existing.TopicConfigurations,
+      },
+    }),
+  );
+
+  ok(
+    `Configured raw video S3 trigger: ${bold(`s3://${bucketName}/raw/*.mp4`)} → ${bold(`${PROBE_LAMBDA_FUNCTION_NAME} (${region})`)}`,
+  );
+}
 
 interface SetupAnswers {
   readonly targetEnv: TargetEnv;
@@ -151,6 +287,7 @@ interface SetupAnswers {
   readonly region: string;
   readonly accountId: string;
   readonly databaseUrl: string;
+  readonly containerDatabaseUrl: string | null;
   readonly fleetMode: FleetMode;
   readonly lambdaArch?: LambdaArchitecture;
   readonly setupProbeLambda?: boolean;
@@ -159,6 +296,11 @@ interface SetupAnswers {
   readonly s3BuildBucket?: string | null;
   readonly s3BucketAccess?: "private" | "public";
   readonly s3CredentialMode: CredentialMode | null;
+  readonly s3Endpoint?: string | null;
+  readonly s3Region?: string | null;
+  readonly s3AccessKeyId?: string | null;
+  readonly s3SecretAccessKey?: string | null;
+  readonly s3ForcePathStyle?: string | null;
   readonly allowedInstanceTypes: readonly string[];
   readonly bootMode: BootMode;
   readonly amiId: string | null;
@@ -453,8 +595,11 @@ export async function checkOrCreateRole(
   );
   ok("Attached EC2 worker control + PassRole inline policy");
 
-  // Ensure the AWS EC2 Spot service-linked role exists in the account
-  await ensureSpotServiceLinkedRole(iam);
+  // Floci models the EC2 API but has no cloud Spot capacity or billing. Do
+  // not create a cloud-only service-linked role in the local emulator.
+  if (!resolveFlociEndpoint()) {
+    await ensureSpotServiceLinkedRole(iam);
+  }
 
   return roleArn;
 }
@@ -484,7 +629,7 @@ export async function createInstanceProfile(
     return profileArn;
   } catch (err: unknown) {
     // AWS SDK v3 puts the exception type on `.name`
-    // ("EntityAlreadyExistsException"); LocalStack's message text for this
+    // ("EntityAlreadyExistsException"); Floci's message text for this
     // case doesn't contain "EntityAlreadyExists" at all ("Instance Profile
     // ... already exists."), so a message-substring check alone misses it
     // there while still matching real AWS.
@@ -536,7 +681,7 @@ async function checkS3Bucket(
   region: string,
   bucketName: string,
 ): Promise<"exists" | "not-found" | "no-access"> {
-  const s3 = new S3Client({ region });
+  const s3 = createS3Client(region);
   try {
     await s3.send(new HeadBucketCommand({ Bucket: bucketName }));
     const loc = await s3.send(
@@ -789,6 +934,7 @@ export async function buildAndUploadWorkerBundle(
       platform: "node",
       target: "node22",
       format: "cjs",
+      external: ["sharp"],
       outfile,
       logLevel: "silent",
     });
@@ -810,7 +956,7 @@ export async function buildAndUploadWorkerBundle(
     // 1. Upload via AWS SDK v3 S3Client
     let uploaded = false;
     try {
-      const s3 = new S3Client({ region });
+      const s3 = createS3Client(region);
       await s3.send(
         new PutObjectCommand({
           Bucket: s3BucketName,
@@ -844,6 +990,7 @@ export async function buildAndUploadWorkerBundle(
           `s3://${s3BucketName}/bundles/media-worker.js`,
           "--region",
           region,
+          ...awsCliEndpointArgs(),
         ],
         { stdio: "pipe", shell: process.platform === "win32" },
       );
@@ -919,7 +1066,7 @@ async function setupLambda(
   envVars: Readonly<Record<string, string>>,
   arch: "arm64" | "x86_64" = "arm64",
 ): Promise<string | null> {
-  const lambda = new LambdaClient({ region });
+  const lambda = createLambdaClient(region);
   const architecture =
     arch === "x86_64" ? Architecture.x86_64 : Architecture.arm64;
 
@@ -1092,7 +1239,15 @@ export async function uploadFileOrBufferToS3(
       fsSync.writeFileSync(tempPath, body);
       execFileSync(
         "aws",
-        ["s3", "cp", tempPath, `s3://${bucket}/${key}`, "--region", region],
+        [
+          "s3",
+          "cp",
+          tempPath,
+          `s3://${bucket}/${key}`,
+          "--region",
+          region,
+          ...awsCliEndpointArgs(),
+        ],
         { stdio: "pipe", shell: process.platform === "win32" },
       );
       return true;
@@ -1120,7 +1275,7 @@ export async function buildAndUploadBuildArtifacts(
     includeLambda = true,
     includeProbe = false,
   } = options;
-  const s3 = new S3Client({ region });
+  const s3 = createS3Client(region);
   let workerBundleUploaded = false;
   let lambdaZipUploaded = false;
   let probeZipUploaded = false;
@@ -1233,7 +1388,7 @@ async function setupProbeLambda(
   arch: "arm64" | "x86_64",
   envVars: Readonly<Record<string, string>>,
 ): Promise<string | null> {
-  const lambda = new LambdaClient({ region });
+  const lambda = createLambdaClient(region);
   const architecture =
     arch === "x86_64" ? Architecture.x86_64 : Architecture.arm64;
 
@@ -1348,11 +1503,37 @@ async function generateEnvFiles(
     STORAGE_PROVIDER: answers.storageProvider,
   };
 
-  if (answers.profile) {
+  if (answers.targetEnv === "floci" && answers.endpointUrl) {
+    // Host-side processes use localhost; Floci rewrites AWS_ENDPOINT_URL for
+    // Lambda/EC2 containers to its Compose service hostname automatically.
+    fleetEnv["FLOCI_ENDPOINT"] = answers.endpointUrl;
+    fleetEnv["AWS_ENDPOINT_URL"] = answers.endpointUrl;
+    fleetEnv["S3_ENDPOINT"] = answers.endpointUrl;
+    fleetEnv["S3_FORCE_PATH_STYLE"] = "true";
+    fleetEnv["AWS_ACCESS_KEY_ID"] = "test";
+    fleetEnv["AWS_SECRET_ACCESS_KEY"] = "test";
+    fleetEnv["FLOCI_DATABASE_URL"] =
+      answers.containerDatabaseUrl || DEFAULT_FLOCI_DATABASE_URL;
+  } else if (answers.profile) {
     fleetEnv["AWS_PROFILE"] = answers.profile;
   }
   if (answers.s3BucketName) {
     fleetEnv["S3_BUCKET"] = answers.s3BucketName;
+  }
+  if (answers.s3Endpoint) {
+    fleetEnv["S3_ENDPOINT"] = answers.s3Endpoint;
+  }
+  if (answers.s3Region) {
+    fleetEnv["S3_REGION"] = answers.s3Region;
+  }
+  if (answers.s3AccessKeyId) {
+    fleetEnv["S3_ACCESS_KEY_ID"] = answers.s3AccessKeyId;
+  }
+  if (answers.s3SecretAccessKey) {
+    fleetEnv["S3_SECRET_ACCESS_KEY"] = answers.s3SecretAccessKey;
+  }
+  if (answers.s3ForcePathStyle) {
+    fleetEnv["S3_FORCE_PATH_STYLE"] = answers.s3ForcePathStyle;
   }
   if (answers.s3BuildBucket) {
     fleetEnv["S3_BUILD_BUCKET"] = answers.s3BuildBucket;
@@ -1366,6 +1547,11 @@ async function generateEnvFiles(
   if (result.lambdaFunctionArn) {
     fleetEnv["LAMBDA_FUNCTION_ARN"] = result.lambdaFunctionArn;
     fleetEnv["FLEET_MANAGER_LAMBDA_NAME"] = LAMBDA_FUNCTION_NAME;
+  }
+  if (result.workerRoleArn) {
+    // The serverful AWS provider and the serverless Lambda both use the
+    // shared worker role when creating one-shot EventBridge schedules.
+    fleetEnv["SCHEDULER_ROLE_ARN"] = result.workerRoleArn;
   }
   if (answers.lambdaArch) {
     fleetEnv["LAMBDA_ARCHITECTURE"] = answers.lambdaArch;
@@ -1382,12 +1568,8 @@ async function generateEnvFiles(
   if (result.ffprobeLayerArn) {
     fleetEnv["FFPROBE_LAYER_ARN"] = result.ffprobeLayerArn;
   }
-  if (answers.targetEnv === "localstack" && answers.endpointUrl) {
-    fleetEnv["AWS_ENDPOINT_URL"] = answers.endpointUrl;
-    fleetEnv["EC2_VM_MANAGER"] = "docker";
-    fleetEnv["AMI_ID"] = LOCALSTACK_DOCKER_AMI_ID;
-    fleetEnv["AWS_ACCESS_KEY_ID"] = "test";
-    fleetEnv["AWS_SECRET_ACCESS_KEY"] = "test";
+  if (answers.targetEnv === "floci") {
+    fleetEnv["AMI_ID"] = answers.amiId || FLOCI_DEFAULT_AMI_ID;
   } else if (answers.amiId) {
     // writeEnvFile() below replaces the whole file, not just the keys
     // listed here — without this, re-running the wizard for any reason
@@ -1411,7 +1593,18 @@ async function generateEnvFiles(
     WORKER_IDLE_POLL_SECONDS: String(answers.workerIdlePollSeconds),
   };
 
-  if (answers.profile) {
+  if (answers.targetEnv === "floci" && answers.endpointUrl) {
+    workerEnv["FLOCI_ENDPOINT"] = answers.endpointUrl;
+    workerEnv["AWS_ENDPOINT_URL"] = answers.endpointUrl;
+    workerEnv["S3_ENDPOINT"] = answers.endpointUrl;
+    workerEnv["S3_FORCE_PATH_STYLE"] = "true";
+    workerEnv["AWS_ACCESS_KEY_ID"] = "test";
+    workerEnv["AWS_SECRET_ACCESS_KEY"] = "test";
+    workerEnv["S3_ACCESS_KEY_ID"] = "test";
+    workerEnv["S3_SECRET_ACCESS_KEY"] = "test";
+    workerEnv["FLOCI_DATABASE_URL"] =
+      answers.containerDatabaseUrl || DEFAULT_FLOCI_DATABASE_URL;
+  } else if (answers.profile) {
     workerEnv["AWS_PROFILE"] = answers.profile;
   }
   if (answers.s3BucketName) {
@@ -1420,18 +1613,27 @@ async function generateEnvFiles(
       workerEnv["S3_USE_INSTANCE_ROLE"] = "true";
     }
   }
+  if (answers.s3Endpoint) {
+    workerEnv["S3_ENDPOINT"] = answers.s3Endpoint;
+  }
+  if (answers.s3Region) {
+    workerEnv["S3_REGION"] = answers.s3Region;
+  }
+  if (answers.s3AccessKeyId) {
+    workerEnv["S3_ACCESS_KEY_ID"] = answers.s3AccessKeyId;
+  }
+  if (answers.s3SecretAccessKey) {
+    workerEnv["S3_SECRET_ACCESS_KEY"] = answers.s3SecretAccessKey;
+  }
+  if (answers.s3ForcePathStyle) {
+    workerEnv["S3_FORCE_PATH_STYLE"] = answers.s3ForcePathStyle;
+  }
   if (answers.s3BuildBucket) {
     workerEnv["S3_BUILD_BUCKET"] = answers.s3BuildBucket;
   }
   if (result.keyName) {
     workerEnv["KEY_NAME"] = result.keyName;
   }
-  if (answers.targetEnv === "localstack" && answers.endpointUrl) {
-    workerEnv["AWS_ENDPOINT_URL"] = answers.endpointUrl;
-    workerEnv["AWS_ACCESS_KEY_ID"] = "test";
-    workerEnv["AWS_SECRET_ACCESS_KEY"] = "test";
-  }
-
   await writeEnvFile(
     path.join(repoRoot, "apps", "media-worker", ".env"),
     workerEnv,
@@ -1447,6 +1649,16 @@ function parseSetupCliArgs(): Partial<SetupAnswers> & {
     const val = eqIdx >= 0 ? arg.slice(eqIdx + 1).trim() : "";
     if (arg.startsWith("--region=")) {
       result.region = val;
+    } else if (arg.startsWith("--target=") || arg.startsWith("--where=")) {
+      if (val === "aws" || val === "floci") result.targetEnv = val;
+    } else if (arg === "--floci") {
+      result.targetEnv = "floci";
+    } else if (
+      arg.startsWith("--endpoint=") ||
+      arg.startsWith("--floci-endpoint=")
+    ) {
+      result.endpointUrl = val;
+      result.targetEnv = "floci";
     } else if (
       arg.startsWith("--profile=") ||
       arg.startsWith("--aws-profile=")
@@ -1474,6 +1686,24 @@ function parseSetupCliArgs(): Partial<SetupAnswers> & {
       result.s3BucketAccess = "public";
     } else if (arg.startsWith("--ami-name=") || arg.startsWith("--name=")) {
       result.amiName = val;
+    } else if (
+      arg.startsWith("--storage=") ||
+      arg.startsWith("--storage-provider=")
+    ) {
+      result.storageProvider = val === "local" ? "local" : "s3";
+    } else if (
+      arg.startsWith("--s3-endpoint=") ||
+      arg.startsWith("--endpoint=")
+    ) {
+      result.s3Endpoint = val;
+    } else if (arg.startsWith("--s3-region=")) {
+      result.s3Region = val;
+    } else if (arg.startsWith("--s3-access-key-id=")) {
+      result.s3AccessKeyId = val;
+    } else if (arg.startsWith("--s3-secret-access-key=")) {
+      result.s3SecretAccessKey = val;
+    } else if (arg.startsWith("--s3-force-path-style=")) {
+      result.s3ForcePathStyle = val;
     } else if (arg.startsWith("--db=") || arg.startsWith("--database-url=")) {
       result.databaseUrl = val;
     } else if (arg.startsWith("--mode=") || arg.startsWith("--fleet-mode=")) {
@@ -1504,8 +1734,14 @@ function loadExistingConfig(repoRoot: string): Partial<SetupAnswers> {
     ...fleetEnv,
     ...process.env,
   };
+  if (cliArgs.endpointUrl) {
+    combined["FLOCI_ENDPOINT"] = cliArgs.endpointUrl;
+    combined["AWS_ENDPOINT_URL"] = cliArgs.endpointUrl;
+  }
   if (cliArgs.region) combined["AWS_REGION"] = cliArgs.region;
   if (cliArgs.profile) combined["AWS_PROFILE"] = cliArgs.profile;
+  if (cliArgs.storageProvider)
+    combined["STORAGE_PROVIDER"] = cliArgs.storageProvider;
   if (cliArgs.s3BucketName) {
     combined["S3_BUCKET"] = cliArgs.s3BucketName;
     combined["STORAGE_PROVIDER"] = "s3";
@@ -1516,27 +1752,40 @@ function loadExistingConfig(repoRoot: string): Partial<SetupAnswers> {
   if (cliArgs.s3BucketAccess) {
     combined["S3_BUCKET_ACCESS"] = cliArgs.s3BucketAccess;
   }
+  if (cliArgs.s3Endpoint) combined["S3_ENDPOINT"] = cliArgs.s3Endpoint;
+  if (cliArgs.s3Region) combined["S3_REGION"] = cliArgs.s3Region;
+  if (cliArgs.s3AccessKeyId)
+    combined["S3_ACCESS_KEY_ID"] = cliArgs.s3AccessKeyId;
+  if (cliArgs.s3SecretAccessKey)
+    combined["S3_SECRET_ACCESS_KEY"] = cliArgs.s3SecretAccessKey;
+  if (cliArgs.s3ForcePathStyle)
+    combined["S3_FORCE_PATH_STYLE"] = cliArgs.s3ForcePathStyle;
   if (cliArgs.amiName) {
     combined["AMI_NAME"] = cliArgs.amiName;
   }
   if (cliArgs.databaseUrl) combined["DATABASE_URL"] = cliArgs.databaseUrl;
   if (cliArgs.fleetMode) combined["FLEET_MODE"] = cliArgs.fleetMode;
 
-  const targetEnv: TargetEnv = combined["AWS_ENDPOINT_URL"]
-    ? "localstack"
-    : "aws";
-  const endpointUrl = combined["AWS_ENDPOINT_URL"] || null;
+  const configuredEndpoint = resolveFlociEndpoint(combined) ?? null;
+  const targetEnv: TargetEnv =
+    cliArgs.targetEnv ?? (configuredEndpoint ? "floci" : "aws");
+  const endpointUrl = targetEnv === "floci" ? configuredEndpoint : null;
   const profile = combined["AWS_PROFILE"] || null;
   const region = combined["AWS_REGION"] || "us-east-1";
   const fleetMode: FleetMode =
     combined["FLEET_MODE"] === "serverful" ? "serverful" : "serverless";
   const storageProvider: StorageProvider =
-    combined["STORAGE_PROVIDER"] === "other" ||
-    combined["STORAGE_PROVIDER"] === "local"
-      ? "other"
+    combined["STORAGE_PROVIDER"] === "local" ||
+    combined["STORAGE_PROVIDER"] === "other"
+      ? "local"
       : "s3";
   const s3BucketName = resolveS3BucketName(combined);
   const s3BuildBucket = resolveS3BuildBucketName(combined);
+  const s3Endpoint = combined["S3_ENDPOINT"] || null;
+  const s3Region = combined["S3_REGION"] || null;
+  const s3AccessKeyId = combined["S3_ACCESS_KEY_ID"] || null;
+  const s3SecretAccessKey = combined["S3_SECRET_ACCESS_KEY"] || null;
+  const s3ForcePathStyle = combined["S3_FORCE_PATH_STYLE"] || null;
   const rawBucketAccess = combined["S3_BUCKET_ACCESS"]?.toLowerCase().trim();
   const s3BucketAccess: "private" | "public" | undefined =
     rawBucketAccess === "public" || rawBucketAccess === "private"
@@ -1551,16 +1800,30 @@ function loadExistingConfig(repoRoot: string): Partial<SetupAnswers> {
         .filter(Boolean)
     : ["c7g.large", "c7g.xlarge", "c7g.2xlarge", "c6i.large", "c6i.xlarge"];
   const bootMode: BootMode =
-    combined["EC2_BOOT_MODE"] === "ami" || combined["AMI_ID"] ? "ami" : "fresh";
-  const amiId = combined["AMI_ID"] || null;
+    targetEnv === "floci"
+      ? "fresh"
+      : combined["EC2_BOOT_MODE"] === "ami" || combined["AMI_ID"]
+        ? "ami"
+        : "fresh";
+  const amiId =
+    targetEnv === "floci"
+      ? combined["AMI_ID"] || FLOCI_DEFAULT_AMI_ID
+      : combined["AMI_ID"] || null;
   const amiName = combined["AMI_NAME"]?.trim() || null;
   const maxWorkers = parseInt(combined["MAX_WORKERS"] || "8", 10) || 8;
   const workerIdlePollSeconds =
     parseInt(combined["WORKER_IDLE_POLL_SECONDS"] || "15", 10) || 15;
-  const useSpot = combined["EC2_USE_SPOT"] !== "false";
+  const useSpot =
+    targetEnv === "floci" ? false : combined["EC2_USE_SPOT"] !== "false";
   const databaseUrl =
-    combined["DATABASE_URL"] ||
-    "postgresql://veolms:veolms@localhost:5433/veolms";
+    combined["DATABASE_URL"] || DEFAULT_FLOCI_HOST_DATABASE_URL;
+  const containerDatabaseUrl =
+    targetEnv === "floci"
+      ? resolveFlociContainerDatabaseUrl(
+          databaseUrl,
+          combined["FLOCI_DATABASE_URL"],
+        )
+      : null;
   const allowSsh = combined["ALLOW_SSH"] !== "false";
   const keyName = allowSsh
     ? combined["EC2_KEY_NAME"] || combined["KEY_NAME"] || null
@@ -1593,6 +1856,11 @@ function loadExistingConfig(repoRoot: string): Partial<SetupAnswers> {
     s3BuildBucket,
     s3BucketAccess,
     s3CredentialMode,
+    s3Endpoint,
+    s3Region,
+    s3AccessKeyId,
+    s3SecretAccessKey,
+    s3ForcePathStyle,
     allowedInstanceTypes,
     bootMode,
     amiId,
@@ -1601,6 +1869,7 @@ function loadExistingConfig(repoRoot: string): Partial<SetupAnswers> {
     workerIdlePollSeconds,
     useSpot,
     databaseUrl,
+    containerDatabaseUrl,
     keyName,
     securityGroupId,
     allowSsh,
@@ -1608,6 +1877,33 @@ function loadExistingConfig(repoRoot: string): Partial<SetupAnswers> {
 }
 
 // ─── Setup Flow ───────────────────────────────────────────────────────────────
+
+function redactDatabaseUrl(databaseUrl: string): string {
+  try {
+    const parsed = new URL(databaseUrl);
+    const authority = parsed.username ? "***@" : "";
+    return `${parsed.protocol}//${authority}${parsed.host}${parsed.pathname}${parsed.search}`;
+  } catch {
+    return "[configured database URL]";
+  }
+}
+
+async function askDatabaseUrl(
+  rl: readline.Interface | undefined,
+  question: string,
+  defaultUrl: string,
+): Promise<string> {
+  const nonInteractive = isNonInteractive();
+  const hint = dim(` (default: ${redactDatabaseUrl(defaultUrl)})`);
+  if (nonInteractive || !rl) {
+    console.log(`  ${bold("?")} ${question}${hint}: ${green("[configured]")}`);
+    return defaultUrl;
+  }
+
+  const answer = await rl.question(`  ${bold("?")} ${question}${hint}: `);
+  const trimmed = answer.replace(/\r$/, "").trim();
+  return trimmed === "" ? defaultUrl : trimmed;
+}
 
 async function runSetupFlow(
   rl: readline.Interface,
@@ -1618,34 +1914,51 @@ async function runSetupFlow(
 
   // ── Step 1: Target Environment ─────────────────────────────────────────────
   step(1, TOTAL_STEPS, "Target Environment");
-  const defaultTargetEnv = initialDefaults?.targetEnv ?? "aws";
-  const targetEnv = defaultTargetEnv;
-
-  // TEMP: disable localstack as of now we need a implment of that .
-  // const targetEnv = await askChoice(
-  //   rl,
-  //   "Where should this provision resources?",
-  //   [
-  //     { label: "Cloud AWS (production, billed)", value: "aws" as TargetEnv },
-  //     {
-  //       label: "LocalStack (local testing, free — requires LocalStack running)",
-  //       value: "localstack" as TargetEnv,
-  //     },
-  //   ],
-  //   defaultTargetEnv === "localstack" ? 1 : 0,
-  // );
+  const cliArgs = parseSetupCliArgs();
+  const defaultTargetEnv: TargetEnv =
+    cliArgs.targetEnv ?? initialDefaults?.targetEnv ?? "floci";
+  const targetEnv: TargetEnv =
+    cliArgs.targetEnv || isNonInteractive()
+      ? defaultTargetEnv
+      : await askChoice(
+          rl,
+          "Where should this provision resources?",
+          [
+            {
+              label: "Floci local emulator (Docker, free, no cloud)",
+              value: "floci" as TargetEnv,
+            },
+            {
+              label: "AWS cloud (production, billed — uses AWS credentials)",
+              value: "aws" as TargetEnv,
+            },
+          ],
+          defaultTargetEnv === "aws" ? 1 : 0,
+        );
 
   let endpointUrl: string | null = null;
   let awsProfile: string | null =
     initialDefaults?.profile ?? process.env["AWS_PROFILE"] ?? null;
 
   if (targetEnv === "aws") {
+    const previousFlociEndpoint = resolveFlociEndpoint();
+    delete process.env.FLOCI_ENDPOINT;
     delete process.env.AWS_ENDPOINT_URL;
+    if (previousFlociEndpoint === process.env.S3_ENDPOINT) {
+      delete process.env.S3_ENDPOINT;
+      delete process.env.S3_FORCE_PATH_STYLE;
+    }
     if (process.env.AWS_ACCESS_KEY_ID === "test") {
       delete process.env.AWS_ACCESS_KEY_ID;
     }
     if (process.env.AWS_SECRET_ACCESS_KEY === "test") {
       delete process.env.AWS_SECRET_ACCESS_KEY;
+    }
+    if (process.env.S3_ACCESS_KEY_ID === "test") {
+      delete process.env.S3_ACCESS_KEY_ID;
+    }
+    if (process.env.S3_SECRET_ACCESS_KEY === "test") {
+      delete process.env.S3_SECRET_ACCESS_KEY;
     }
 
     const availableProfiles = listAvailableAwsProfiles();
@@ -1702,18 +2015,40 @@ async function runSetupFlow(
       process.env.AWS_PROFILE = awsProfile;
       info(`Active AWS profile: ${bold(awsProfile)}`);
     }
-  } else if (targetEnv === "localstack") {
+  } else if (targetEnv === "floci") {
+    awsProfile = null;
+    delete process.env.AWS_PROFILE;
     const defaultEndpoint =
-      initialDefaults?.endpointUrl ?? DEFAULT_LOCALSTACK_ENDPOINT;
-    endpointUrl = await ask(rl, "LocalStack endpoint URL", defaultEndpoint);
+      initialDefaults?.endpointUrl ??
+      resolveFlociEndpoint() ??
+      DEFAULT_FLOCI_ENDPOINT;
+    endpointUrl = await ask(rl, "Floci endpoint URL", defaultEndpoint);
+    try {
+      const parsedEndpoint = new URL(endpointUrl);
+      if (
+        parsedEndpoint.protocol !== "http:" &&
+        parsedEndpoint.protocol !== "https:"
+      ) {
+        throw new Error("endpoint must use http:// or https://");
+      }
+      endpointUrl = parsedEndpoint.toString().replace(/\/$/, "");
+    } catch (err) {
+      throw new Error(
+        `Invalid Floci endpoint URL "${endpointUrl}": ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    process.env.FLOCI_ENDPOINT = endpointUrl;
     process.env.AWS_ENDPOINT_URL = endpointUrl;
-    process.env.AWS_ACCESS_KEY_ID ??= "test";
-    process.env.AWS_SECRET_ACCESS_KEY ??= "test";
-    process.env.EC2_VM_MANAGER = "docker";
-    warn(
-      "LocalStack Docker VM mode requires EC2_VM_MANAGER=docker and the " +
-        "container-runtime socket mounted at /var/run/docker.sock.",
+    process.env.AWS_ACCESS_KEY_ID = "test";
+    process.env.AWS_SECRET_ACCESS_KEY = "test";
+    process.env.S3_ENDPOINT = endpointUrl;
+    process.env.S3_FORCE_PATH_STYLE = "true";
+    process.env.S3_ACCESS_KEY_ID = "test";
+    process.env.S3_SECRET_ACCESS_KEY = "test";
+    info(
+      `Using Floci at ${bold(endpointUrl)}. All setup calls are pinned to this local endpoint; no AWS cloud credentials are used.`,
     );
+    await ensureFlociDocker({ repoRoot, endpoint: endpointUrl });
   }
 
   // ── Step 2: Region ──────────────────────────────────────────────────────────
@@ -1723,7 +2058,11 @@ async function runSetupFlow(
 
   // ── AWS Credential Pre-flight Check ────────────────────────────────────────
   info("Checking AWS credentials...");
-  const identity = await checkAwsCredentials(region, awsProfile ?? undefined);
+  const identity = await checkAwsCredentials(
+    region,
+    awsProfile ?? undefined,
+    endpointUrl ?? undefined,
+  );
   const accountId = identity.accountId;
 
   // ── Step 3: Fleet Manager Mode ─────────────────────────────────────────────
@@ -1813,378 +2152,171 @@ async function runSetupFlow(
 
   // ── Step 6: Storage Provider ───────────────────────────────────────────────
   step(6, TOTAL_STEPS, "Video Storage Provider");
-  const defaultStorageProvider = initialDefaults?.storageProvider ?? "s3";
-  const storageProvider = await askChoice(
+  const storageConfig = await promptStorageConfig({
     rl,
-    "Where will transcoded HLS output be stored?",
-    [
-      { label: "AWS S3 (recommended)", value: "s3" as StorageProvider },
-      {
-        label: "Other / local (no S3 permission added to EC2 role)",
-        value: "other" as StorageProvider,
-      },
-    ],
-    defaultStorageProvider === "other" ? 1 : 0,
-  );
+    provider: "aws",
+    existingEnv: {
+      STORAGE_PROVIDER:
+        initialDefaults?.storageProvider ??
+        (targetEnv === "floci" ? "s3" : undefined),
+      S3_BUCKET: initialDefaults?.s3BucketName ?? undefined,
+      S3_ENDPOINT: initialDefaults?.s3Endpoint ?? undefined,
+      S3_REGION: initialDefaults?.s3Region ?? region,
+      // Floci's AWS provider path should exercise the IAM role/profile. The
+      // deterministic test keys are still written to generated env files for
+      // host-side clients, but must not make the wizard default to manual S3
+      // credentials.
+      S3_ACCESS_KEY_ID:
+        targetEnv === "floci"
+          ? undefined
+          : (initialDefaults?.s3AccessKeyId ?? undefined),
+      S3_SECRET_ACCESS_KEY:
+        targetEnv === "floci"
+          ? undefined
+          : (initialDefaults?.s3SecretAccessKey ?? undefined),
+      S3_FORCE_PATH_STYLE: initialDefaults?.s3ForcePathStyle ?? undefined,
+      S3_USE_INSTANCE_ROLE:
+        initialDefaults?.s3CredentialMode === "automatic" ? "true" : undefined,
+    },
+  });
 
+  const storageProvider: StorageProvider = storageConfig.storageProvider;
   let s3BucketName: string | null = null;
   let s3BuildBucket: string | null = null;
   let s3BucketAccess: "private" | "public" =
     initialDefaults?.s3BucketAccess ?? "private";
   let s3CredentialMode: CredentialMode | null = null;
+  let s3Endpoint: string | null = null;
+  let s3Region: string | null = null;
+  let s3AccessKeyId: string | null = null;
+  let s3SecretAccessKey: string | null = null;
+  let s3ForcePathStyle: string | null = null;
 
   if (storageProvider === "s3") {
-    const initialBucketExists = initialDefaults?.s3BucketName
-      ? (await checkS3Bucket(region, initialDefaults.s3BucketName)) === "exists"
-      : false;
-    const defaultBucketMode: "existing" | "create" = initialBucketExists
-      ? "existing"
-      : "create";
-    const bucketMode = await askChoice<"existing" | "create">(
-      rl,
-      "S3 bucket for transcoded HLS output?",
-      [
-        { label: "Use an existing bucket", value: "existing" },
-        { label: "Create a new bucket", value: "create" },
-      ],
-      defaultBucketMode === "existing" ? 0 : 1,
-    );
-
-    let defaultBucket = initialDefaults?.s3BucketName ?? "";
-    while (true) {
-      const bucketInput = await ask(
+    if (storageConfig.useIamRole) {
+      s3CredentialMode = "automatic";
+      const initialBucketExists = initialDefaults?.s3BucketName
+        ? (await checkS3Bucket(region, initialDefaults.s3BucketName)) ===
+          "exists"
+        : false;
+      const defaultBucketMode: "existing" | "create" = initialBucketExists
+        ? "existing"
+        : "create";
+      const bucketMode = await askChoice<"existing" | "create">(
         rl,
-        bucketMode === "create"
-          ? "New S3 bucket name (leave empty to skip)"
-          : "Existing S3 bucket name (leave empty to skip)",
-        defaultBucket || undefined,
-      );
-
-      if (!bucketInput) {
-        s3BucketName = null;
-        break;
-      }
-
-      if (!isValidS3BucketName(bucketInput)) {
-        warn(
-          `"${bucketInput}" is not a valid S3 bucket name — use 3-63 lowercase letters, digits, dots, or hyphens, starting and ending with a letter or digit.`,
-        );
-        defaultBucket = "";
-        continue;
-      }
-
-      info(`Checking bucket ${bold(bucketInput)}...`);
-      const bucketStatus = await checkS3Bucket(region, bucketInput);
-
-      if (bucketMode === "existing") {
-        if (bucketStatus === "exists") {
-          s3BucketName = bucketInput;
-          ok(
-            `Bucket ${bold(s3BucketName)} found and accessible — will grant EC2 role access.`,
-          );
-          break;
-        } else if (bucketStatus === "no-access") {
-          warn(
-            `Bucket ${bold(bucketInput)} exists but is owned by another AWS account or inaccessible (Access Denied).`,
-          );
-          defaultBucket = "";
-          continue;
-        } else {
-          warn(
-            `Bucket ${bold(bucketInput)} does not exist — nothing was created, since you chose to use an existing bucket.`,
-          );
-          info(
-            "Enter the correct existing bucket name, or leave empty to skip.",
-          );
-          defaultBucket = "";
-          continue;
-        }
-      }
-
-      // bucketMode === "create" — never silently reuse an existing bucket
-      if (bucketStatus === "exists" || bucketStatus === "no-access") {
-        warn(
-          `Bucket ${bold(bucketInput)} already exists${bucketStatus === "no-access" ? " (owned by another AWS account)" : ""} — S3 bucket names are globally unique across all AWS accounts.`,
-        );
-        info("Please enter a different name for the new bucket.");
-        defaultBucket = "";
-        continue;
-      }
-
-      const defaultBucketAccess: "private" | "public" =
-        initialDefaults?.s3BucketAccess ?? "private";
-      const bucketAccess = await askChoice<"private" | "public">(
-        rl,
-        "Media storage bucket access policy:",
+        "S3 bucket for transcoded HLS output?",
         [
-          {
-            label:
-              "Private (recommended — all public access blocked, IAM access only)",
-            value: "private",
-          },
-          {
-            label:
-              "Public (allows direct public read for HLS streams via S3 URLs)",
-            value: "public",
-          },
+          { label: "Use an existing bucket", value: "existing" },
+          { label: "Create a new bucket", value: "create" },
         ],
-        defaultBucketAccess === "public" ? 1 : 0,
+        defaultBucketMode === "existing" ? 0 : 1,
       );
 
-      info(
-        `Bucket ${bold(bucketInput)} does not exist. Creating in ${region}...`,
-      );
-      try {
-        const s3Client = new S3Client({ region });
-        if (region === "us-east-1") {
-          await s3Client.send(new CreateBucketCommand({ Bucket: bucketInput }));
-        } else {
-          await s3Client.send(
-            new CreateBucketCommand({
-              Bucket: bucketInput,
-              CreateBucketConfiguration: {
-                LocationConstraint: region as BucketLocationConstraint,
-              },
-            }),
-          );
-        }
-
-        if (bucketAccess === "private") {
-          await s3Client.send(
-            new PutPublicAccessBlockCommand({
-              Bucket: bucketInput,
-              PublicAccessBlockConfiguration: {
-                BlockPublicAcls: true,
-                IgnorePublicAcls: true,
-                BlockPublicPolicy: true,
-                RestrictPublicBuckets: true,
-              },
-            }),
-          );
-        } else {
-          await s3Client.send(
-            new PutPublicAccessBlockCommand({
-              Bucket: bucketInput,
-              PublicAccessBlockConfiguration: {
-                BlockPublicAcls: false,
-                IgnorePublicAcls: false,
-                BlockPublicPolicy: false,
-                RestrictPublicBuckets: false,
-              },
-            }),
-          );
-          const pubPolicy = JSON.stringify({
-            Version: "2012-10-17",
-            Statement: [
-              {
-                Sid: "PublicReadGetObject",
-                Effect: "Allow",
-                Principal: "*",
-                Action: "s3:GetObject",
-                Resource: `arn:aws:s3:::${bucketInput}/*`,
-              },
-            ],
-          });
-          await s3Client.send(
-            new PutBucketPolicyCommand({
-              Bucket: bucketInput,
-              Policy: pubPolicy,
-            }),
-          );
-        }
-
-        await s3Client.send(
-          new PutBucketCorsCommand({
-            Bucket: bucketInput,
-            CORSConfiguration: {
-              CORSRules: [
-                {
-                  AllowedHeaders: ["*"],
-                  AllowedMethods: ["GET", "HEAD"],
-                  AllowedOrigins: ["*"],
-                  MaxAgeSeconds: 3600,
-                },
-              ],
-            },
-          }),
-        );
-        s3BucketName = bucketInput;
-        s3BucketAccess = bucketAccess;
-        ok(
-          bucketAccess === "private"
-            ? `Created private S3 bucket ${bold(s3BucketName)} (all public access blocked, CORS enabled).`
-            : `Created public S3 bucket ${bold(s3BucketName)} with public read and CORS enabled.`,
-        );
-        break;
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        warn(`Could not create bucket "${bucketInput}": ${msg}`);
-        info("Please enter a different S3 bucket name.");
-        defaultBucket = "";
-        continue;
-      }
-    }
-
-    if (s3BucketName) {
-      const defaultCredMode =
-        initialDefaults?.s3CredentialMode === "manual" ? 1 : 0;
-      s3CredentialMode = await askChoice(
-        rl,
-        "How should workers authenticate to S3?",
-        [
-          {
-            label:
-              "Automatic — EC2 Instance Role (recommended, no key management)",
-            value: "automatic" as CredentialMode,
-          },
-          {
-            label:
-              "Manual — Provide AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY yourself",
-            value: "manual" as CredentialMode,
-          },
-        ],
-        defaultCredMode,
-      );
-
-      if (s3CredentialMode === "manual") {
-        warn(
-          "Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in apps/media-worker/.env.",
-        );
-      }
-
-      // S3 Build Bucket for worker scripts, Lambda packages, and worker logs
-      const defaultBuildOption: "dedicated" | "same" =
-        initialDefaults?.s3BuildBucket &&
-        initialDefaults.s3BuildBucket === s3BucketName
-          ? "same"
-          : "dedicated";
-
-      const buildBucketOption = await askChoice(
-        rl,
-        "Where should worker & lambda build scripts and logs be stored?",
-        [
-          {
-            label:
-              "Dedicated Private Build S3 Bucket (recommended — IAM access only, all public blocked)",
-            value: "dedicated",
-          },
-          {
-            label: "Reuse the video storage bucket",
-            value: "same",
-          },
-        ],
-        defaultBuildOption === "same" ? 1 : 0,
-      );
-
-      if (buildBucketOption === "same") {
-        s3BuildBucket = s3BucketName;
-        ok(`Using ${bold(s3BucketName)} as build bucket.`);
-      } else {
-        const initialBuildExists =
-          initialDefaults?.s3BuildBucket &&
-          initialDefaults.s3BuildBucket !== s3BucketName
-            ? (await checkS3Bucket(region, initialDefaults.s3BuildBucket)) ===
-              "exists"
-            : false;
-        const defaultBuildMode: "existing" | "create" = initialBuildExists
-          ? "existing"
-          : "create";
-
-        const buildMode = await askChoice<"existing" | "create">(
+      let defaultBucket = initialDefaults?.s3BucketName ?? "";
+      while (true) {
+        const bucketInput = await ask(
           rl,
-          "Private build bucket setup method:",
-          [
-            { label: "Use an existing private S3 bucket", value: "existing" },
-            { label: "Create a new private S3 build bucket", value: "create" },
-          ],
-          defaultBuildMode === "existing" ? 0 : 1,
+          bucketMode === "create"
+            ? "New S3 bucket name (leave empty to skip)"
+            : "Existing S3 bucket name (leave empty to skip)",
+          defaultBucket || undefined,
         );
 
-        let defaultBuildName =
-          initialDefaults?.s3BuildBucket &&
-          initialDefaults.s3BuildBucket !== s3BucketName
-            ? initialDefaults.s3BuildBucket
-            : `${s3BucketName}-build`;
+        if (!bucketInput) {
+          s3BucketName = null;
+          break;
+        }
 
-        while (true) {
-          const buildInput = await ask(
-            rl,
-            buildMode === "create"
-              ? "New private build S3 bucket name (leave empty to reuse storage bucket)"
-              : "Existing private build S3 bucket name (leave empty to reuse storage bucket)",
-            defaultBuildName || undefined,
+        if (!isValidS3BucketName(bucketInput)) {
+          warn(
+            `"${bucketInput}" is not a valid S3 bucket name — use 3-63 lowercase letters, digits, dots, or hyphens, starting and ending with a letter or digit.`,
           );
+          defaultBucket = "";
+          continue;
+        }
 
-          if (!buildInput) {
-            s3BuildBucket = s3BucketName;
+        info(`Checking bucket ${bold(bucketInput)}...`);
+        const bucketStatus = await checkS3Bucket(region, bucketInput);
+
+        if (bucketMode === "existing") {
+          if (bucketStatus === "exists") {
+            s3BucketName = bucketInput;
+            ok(
+              `Bucket ${bold(s3BucketName)} found and accessible — will grant EC2 role access.`,
+            );
             break;
-          }
-
-          if (!isValidS3BucketName(buildInput)) {
+          } else if (bucketStatus === "no-access") {
             warn(
-              `"${buildInput}" is not a valid S3 bucket name — use 3-63 lowercase letters, digits, dots, or hyphens.`,
+              `Bucket ${bold(bucketInput)} exists but is owned by another AWS account or inaccessible (Access Denied).`,
             );
-            defaultBuildName = "";
+            defaultBucket = "";
+            continue;
+          } else {
+            warn(
+              `Bucket ${bold(bucketInput)} does not exist — nothing was created, since you chose to use an existing bucket.`,
+            );
+            info(
+              "Enter the correct existing bucket name, or leave empty to skip.",
+            );
+            defaultBucket = "";
             continue;
           }
+        }
 
-          info(`Checking private build bucket ${bold(buildInput)}...`);
-          const buildStatus = await checkS3Bucket(region, buildInput);
-
-          if (buildMode === "existing") {
-            if (buildStatus === "exists") {
-              s3BuildBucket = buildInput;
-              ok(
-                `Private build bucket ${bold(s3BuildBucket)} found and accessible.`,
-              );
-              break;
-            } else if (buildStatus === "no-access") {
-              warn(
-                `Bucket ${bold(buildInput)} exists but is owned by another AWS account or inaccessible.`,
-              );
-              defaultBuildName = "";
-              continue;
-            } else {
-              warn(
-                `Bucket ${bold(buildInput)} does not exist — nothing was created.`,
-              );
-              defaultBuildName = "";
-              continue;
-            }
-          }
-
-          // create mode
-          if (buildStatus === "exists" || buildStatus === "no-access") {
-            warn(
-              `Bucket ${bold(buildInput)} already exists — please enter a unique name for the new private build bucket.`,
-            );
-            defaultBuildName = "";
-            continue;
-          }
-
-          info(
-            `Creating private build bucket ${bold(buildInput)} in ${region}...`,
+        // bucketMode === "create" — never silently reuse an existing bucket
+        if (bucketStatus === "exists" || bucketStatus === "no-access") {
+          warn(
+            `Bucket ${bold(bucketInput)} already exists${bucketStatus === "no-access" ? " (owned by another AWS account)" : ""} — S3 bucket names are globally unique across all AWS accounts.`,
           );
-          try {
-            const s3Client = new S3Client({ region });
-            if (region === "us-east-1") {
-              await s3Client.send(
-                new CreateBucketCommand({ Bucket: buildInput }),
-              );
-            } else {
-              await s3Client.send(
-                new CreateBucketCommand({
-                  Bucket: buildInput,
-                  CreateBucketConfiguration: {
-                    LocationConstraint: region as BucketLocationConstraint,
-                  },
-                }),
-              );
-            }
-            // Block all public access on build bucket (strictly private, accessible only via IAM)
+          info("Please enter a different name for the new bucket.");
+          defaultBucket = "";
+          continue;
+        }
+
+        const defaultBucketAccess: "private" | "public" =
+          initialDefaults?.s3BucketAccess ?? "private";
+        const bucketAccess = await askChoice<"private" | "public">(
+          rl,
+          "Media storage bucket access policy:",
+          [
+            {
+              label:
+                "Private (recommended — all public access blocked, IAM access only)",
+              value: "private",
+            },
+            {
+              label:
+                "Public (allows direct public read for HLS streams via S3 URLs)",
+              value: "public",
+            },
+          ],
+          defaultBucketAccess === "public" ? 1 : 0,
+        );
+
+        info(
+          `Bucket ${bold(bucketInput)} does not exist. Creating in ${region}...`,
+        );
+        try {
+          const s3Client = createS3Client(region);
+          if (region === "us-east-1") {
+            await s3Client.send(
+              new CreateBucketCommand({ Bucket: bucketInput }),
+            );
+          } else {
+            await s3Client.send(
+              new CreateBucketCommand({
+                Bucket: bucketInput,
+                CreateBucketConfiguration: {
+                  LocationConstraint: region as BucketLocationConstraint,
+                },
+              }),
+            );
+          }
+
+          if (bucketAccess === "private") {
             await s3Client.send(
               new PutPublicAccessBlockCommand({
-                Bucket: buildInput,
+                Bucket: bucketInput,
                 PublicAccessBlockConfiguration: {
                   BlockPublicAcls: true,
                   IgnorePublicAcls: true,
@@ -2193,38 +2325,282 @@ async function runSetupFlow(
                 },
               }),
             );
-            s3BuildBucket = buildInput;
-            ok(
-              `Created private build bucket ${bold(s3BuildBucket)} (all public access blocked).`,
+          } else {
+            await s3Client.send(
+              new PutPublicAccessBlockCommand({
+                Bucket: bucketInput,
+                PublicAccessBlockConfiguration: {
+                  BlockPublicAcls: false,
+                  IgnorePublicAcls: false,
+                  BlockPublicPolicy: false,
+                  RestrictPublicBuckets: false,
+                },
+              }),
             );
-            break;
-          } catch (err: unknown) {
-            const msg = err instanceof Error ? err.message : String(err);
-            warn(`Could not create build bucket "${buildInput}": ${msg}`);
-            defaultBuildName = "";
-            continue;
+            const pubPolicy = JSON.stringify({
+              Version: "2012-10-17",
+              Statement: [
+                {
+                  Sid: "PublicReadGetObject",
+                  Effect: "Allow",
+                  Principal: "*",
+                  Action: "s3:GetObject",
+                  Resource: `arn:aws:s3:::${bucketInput}/*`,
+                },
+              ],
+            });
+            await s3Client.send(
+              new PutBucketPolicyCommand({
+                Bucket: bucketInput,
+                Policy: pubPolicy,
+              }),
+            );
+          }
+
+          await s3Client.send(
+            new PutBucketCorsCommand({
+              Bucket: bucketInput,
+              CORSConfiguration: {
+                CORSRules: [
+                  {
+                    AllowedHeaders: ["*"],
+                    AllowedMethods: ["GET", "HEAD", "PUT", "POST", "DELETE"],
+                    AllowedOrigins: ["*"],
+                    ExposeHeaders: ["ETag", "Content-Length", "Content-Type"],
+                    MaxAgeSeconds: 3600,
+                  },
+                ],
+              },
+            }),
+          );
+          s3BucketName = bucketInput;
+          s3BucketAccess = bucketAccess;
+          ok(
+            bucketAccess === "private"
+              ? `Created private S3 bucket ${bold(s3BucketName)} (all public access blocked, CORS enabled).`
+              : `Created public S3 bucket ${bold(s3BucketName)} with public read and CORS enabled.`,
+          );
+          break;
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          warn(`Could not create bucket "${bucketInput}": ${msg}`);
+          info("Please enter a different S3 bucket name.");
+          defaultBucket = "";
+          continue;
+        }
+      }
+
+      // S3 Build Bucket for worker scripts, Lambda packages, and worker logs
+      if (s3BucketName) {
+        const defaultBuildOption: "dedicated" | "same" =
+          initialDefaults?.s3BuildBucket &&
+          initialDefaults.s3BuildBucket === s3BucketName
+            ? "same"
+            : "dedicated";
+
+        const buildBucketOption = await askChoice(
+          rl,
+          "Where should worker & lambda build scripts and logs be stored?",
+          [
+            {
+              label:
+                "Dedicated Private Build S3 Bucket (recommended — IAM access only, all public blocked)",
+              value: "dedicated",
+            },
+            {
+              label: "Reuse the video storage bucket",
+              value: "same",
+            },
+          ],
+          defaultBuildOption === "same" ? 1 : 0,
+        );
+
+        if (buildBucketOption === "same") {
+          s3BuildBucket = s3BucketName;
+          ok(`Using ${bold(s3BucketName)} as build bucket.`);
+        } else {
+          const initialBuildExists =
+            initialDefaults?.s3BuildBucket &&
+            initialDefaults.s3BuildBucket !== s3BucketName
+              ? (await checkS3Bucket(region, initialDefaults.s3BuildBucket)) ===
+                "exists"
+              : false;
+          const defaultBuildMode: "existing" | "create" = initialBuildExists
+            ? "existing"
+            : "create";
+
+          const buildMode = await askChoice<"existing" | "create">(
+            rl,
+            "Private build bucket setup method:",
+            [
+              { label: "Use an existing private S3 bucket", value: "existing" },
+              {
+                label: "Create a new private S3 build bucket",
+                value: "create",
+              },
+            ],
+            defaultBuildMode === "existing" ? 0 : 1,
+          );
+
+          let defaultBuildName =
+            initialDefaults?.s3BuildBucket &&
+            initialDefaults.s3BuildBucket !== s3BucketName
+              ? initialDefaults.s3BuildBucket
+              : `${s3BucketName}-build`;
+
+          while (true) {
+            const buildInput = await ask(
+              rl,
+              buildMode === "create"
+                ? "New private build S3 bucket name (leave empty to reuse storage bucket)"
+                : "Existing private build S3 bucket name (leave empty to reuse storage bucket)",
+              defaultBuildName || undefined,
+            );
+
+            if (!buildInput) {
+              s3BuildBucket = s3BucketName;
+              break;
+            }
+
+            if (!isValidS3BucketName(buildInput)) {
+              warn(
+                `"${buildInput}" is not a valid S3 bucket name — use 3-63 lowercase letters, digits, dots, or hyphens.`,
+              );
+              defaultBuildName = "";
+              continue;
+            }
+
+            info(`Checking private build bucket ${bold(buildInput)}...`);
+            const buildStatus = await checkS3Bucket(region, buildInput);
+
+            if (buildMode === "existing") {
+              if (buildStatus === "exists") {
+                s3BuildBucket = buildInput;
+                ok(
+                  `Private build bucket ${bold(s3BuildBucket)} found and accessible.`,
+                );
+                break;
+              } else if (buildStatus === "no-access") {
+                warn(
+                  `Bucket ${bold(buildInput)} exists but is owned by another AWS account or inaccessible.`,
+                );
+                defaultBuildName = "";
+                continue;
+              } else {
+                warn(
+                  `Bucket ${bold(buildInput)} does not exist — nothing was created.`,
+                );
+                defaultBuildName = "";
+                continue;
+              }
+            }
+
+            // create mode
+            if (buildStatus === "exists" || buildStatus === "no-access") {
+              warn(
+                `Bucket ${bold(buildInput)} already exists — please enter a unique name for the new private build bucket.`,
+              );
+              defaultBuildName = "";
+              continue;
+            }
+
+            info(
+              `Creating private build bucket ${bold(buildInput)} in ${region}...`,
+            );
+            try {
+              const s3Client = createS3Client(region);
+              if (region === "us-east-1") {
+                await s3Client.send(
+                  new CreateBucketCommand({ Bucket: buildInput }),
+                );
+              } else {
+                await s3Client.send(
+                  new CreateBucketCommand({
+                    Bucket: buildInput,
+                    CreateBucketConfiguration: {
+                      LocationConstraint: region as BucketLocationConstraint,
+                    },
+                  }),
+                );
+              }
+              // Block all public access on build bucket (strictly private, accessible only via IAM)
+              await s3Client.send(
+                new PutPublicAccessBlockCommand({
+                  Bucket: buildInput,
+                  PublicAccessBlockConfiguration: {
+                    BlockPublicAcls: true,
+                    IgnorePublicAcls: true,
+                    BlockPublicPolicy: true,
+                    RestrictPublicBuckets: true,
+                  },
+                }),
+              );
+              s3BuildBucket = buildInput;
+              ok(
+                `Created private build bucket ${bold(s3BuildBucket)} (all public access blocked).`,
+              );
+              break;
+            } catch (err: unknown) {
+              const msg = err instanceof Error ? err.message : String(err);
+              warn(`Could not create build bucket "${buildInput}": ${msg}`);
+              defaultBuildName = "";
+              continue;
+            }
           }
         }
       }
+    } else {
+      // S3-compatible configuration without AWS IAM role
+      s3CredentialMode = "manual";
+      s3BucketName = storageConfig.s3Bucket || null;
+      s3Endpoint = storageConfig.s3Endpoint || null;
+      s3Region = storageConfig.s3Region || region;
+      s3AccessKeyId = storageConfig.s3AccessKeyId || null;
+      s3SecretAccessKey = storageConfig.s3SecretAccessKey || null;
+      s3ForcePathStyle = storageConfig.s3ForcePathStyle || null;
+      s3BuildBucket = s3BucketName;
+      ok(
+        `Configured S3-compatible storage with bucket ${bold(s3BucketName || "")}.`,
+      );
     }
   }
 
   // ── Step 7: Database URL ────────────────────────────────────────────────────
   step(7, TOTAL_STEPS, "Database Connection");
   info(
-    "The deployed Lambda / EC2 workers need a database URL reachable from " +
-      (targetEnv === "localstack" ? "LocalStack" : "AWS") +
-      " — not just from this machine.",
+    targetEnv === "floci"
+      ? "The fleet manager and Floci Lambda / EC2 containers use the configured hosted DATABASE_URL when it is non-local; this flow does not start PostgreSQL."
+      : "The deployed Lambda / EC2 workers need a database URL reachable from AWS — not just from this machine.",
   );
   const defaultDbUrl =
-    initialDefaults?.databaseUrl ??
-    process.env["DATABASE_URL"] ??
-    "postgresql://veolms:veolms@localhost:5433/veolms";
-  const databaseUrl = await ask(
+    cliArgs.databaseUrl ??
+    (targetEnv === "floci"
+      ? initialDefaults?.targetEnv === "floci"
+        ? (initialDefaults.databaseUrl ??
+          process.env["DATABASE_URL"] ??
+          DEFAULT_FLOCI_HOST_DATABASE_URL)
+        : (process.env["FLOCI_HOST_DATABASE_URL"] ??
+          DEFAULT_FLOCI_HOST_DATABASE_URL)
+      : (initialDefaults?.databaseUrl ??
+        process.env["DATABASE_URL"] ??
+        DEFAULT_FLOCI_HOST_DATABASE_URL));
+  const databaseUrl = await askDatabaseUrl(
     rl,
     "PostgreSQL DATABASE_URL for the fleet manager",
     defaultDbUrl,
   );
+  const containerDatabaseUrl =
+    targetEnv === "floci"
+      ? await askDatabaseUrl(
+          rl,
+          "PostgreSQL DATABASE_URL inside Floci Lambda/EC2 containers",
+          resolveFlociContainerDatabaseUrl(
+            databaseUrl,
+            initialDefaults?.containerDatabaseUrl ??
+              process.env["FLOCI_DATABASE_URL"],
+          ),
+        )
+      : null;
 
   // ── Step 8: Allowed EC2 Instance Types ─────────────────────────────────────
   step(8, TOTAL_STEPS, "Allowed EC2 Instance Types");
@@ -2320,11 +2696,13 @@ async function runSetupFlow(
   step(9, TOTAL_STEPS, "EC2 Worker Boot Mode");
 
   let amiId: string | null =
-    initialDefaults?.amiId ?? process.env["AMI_ID"] ?? null;
+    targetEnv === "floci"
+      ? FLOCI_DEFAULT_AMI_ID
+      : (initialDefaults?.amiId ?? process.env["AMI_ID"] ?? null);
   let customAmiName: string | null = initialDefaults?.amiName ?? null;
 
   if (!amiId && targetEnv === "aws") {
-    const ec2Client = new EC2Client({ region });
+    const ec2Client = createEc2Client(region);
     const detected = await findExistingWorkerAmi(ec2Client);
     if (detected) {
       amiId = detected.amiId;
@@ -2334,109 +2712,118 @@ async function runSetupFlow(
     }
   }
 
-  const defaultBootMode =
-    initialDefaults?.bootMode ?? (amiId ? "ami" : "fresh");
-  const bootMode = await askChoice(
-    rl,
-    "How should EC2 workers boot?",
-    [
-      {
-        label:
-          "Fresh install — Install Node.js + FFmpeg on every boot (~3-5 min)",
-        value: "fresh" as BootMode,
-      },
-      {
-        label:
-          "Pre-baked AMI — Custom AMI with Node.js + FFmpeg pre-installed (~30s)",
-        value: "ami" as BootMode,
-      },
-    ],
-    defaultBootMode === "fresh" ? 0 : 1,
-  );
-
-  if (bootMode === "ami") {
-    info("Pre-baked AMI selected.");
-    const amiChoice = await askChoice(
+  let bootMode: BootMode = "fresh";
+  if (targetEnv === "floci") {
+    info(
+      `Floci maps ${bold(FLOCI_DEFAULT_AMI_ID)} to a Docker worker image; using the EC2 UserData bootstrap and skipping cloud AMI creation.`,
+    );
+  } else {
+    const defaultBootMode =
+      initialDefaults?.bootMode ?? (amiId ? "ami" : "fresh");
+    bootMode = await askChoice(
       rl,
-      "Pre-baked AMI configuration:",
+      "How should EC2 workers boot?",
       [
         {
           label:
-            "Build new Pre-baked AMI now (~3-5 min) — Automatically provisions IAM role, builds AMI, and integrates into setup",
-          value: "build_now",
+            "Fresh install — Install Node.js + FFmpeg on every boot (~3-5 min)",
+          value: "fresh" as BootMode,
         },
         {
           label:
-            "Use existing AMI ID — Enter an AMI ID you already created in this region",
-          value: "existing",
-        },
-        {
-          label:
-            "Skip building for now — Leave empty (can build later with pnpm fleet:build-ami)",
-          value: "skip",
+            "Pre-baked AMI — Custom AMI with Node.js + FFmpeg pre-installed (~30s)",
+          value: "ami" as BootMode,
         },
       ],
-      amiId ? 1 : 0,
+      defaultBootMode === "fresh" ? 0 : 1,
     );
 
-    if (amiChoice === "existing") {
-      const enteredAmi = await ask(
+    if (bootMode === "ami") {
+      info("Pre-baked AMI selected.");
+      const amiChoice = await askChoice(
         rl,
-        "Enter existing AMI ID (e.g. ami-0123456789abcdef0)",
-        amiId || undefined,
+        "Pre-baked AMI configuration:",
+        [
+          {
+            label:
+              "Build new Pre-baked AMI now (~3-5 min) — Automatically provisions IAM role, builds AMI, and integrates into setup",
+            value: "build_now",
+          },
+          {
+            label:
+              "Use existing AMI ID — Enter an AMI ID you already created in this region",
+            value: "existing",
+          },
+          {
+            label:
+              "Skip building for now — Leave empty (can build later with pnpm fleet:build-ami)",
+            value: "skip",
+          },
+        ],
+        amiId ? 1 : 0,
       );
-      amiId = enteredAmi.trim() || null;
-      if (amiId) {
-        ok(`Using existing AMI ID: ${bold(amiId)}`);
-      }
-    } else if (amiChoice === "build_now") {
-      info(
-        "Ensuring IAM Worker Role & Instance Profile exist before builder launch...",
-      );
-      const tempIam = new IAMClient({ region });
-      const workerRoleArn = await checkOrCreateRole(
-        tempIam,
-        storageProvider === "s3" && s3BucketName !== null,
-        s3BucketName,
-        s3BuildBucket,
-      );
-      await createInstanceProfile(tempIam, workerRoleArn);
 
-      const amiArch = allowedInstanceTypes.some(
-        (t) =>
-          t.startsWith("t4g") ||
-          t.startsWith("c7g") ||
-          t.startsWith("c8g") ||
-          t.startsWith("m7g"),
-      )
-        ? "arm64"
-        : "x86_64";
-      const defaultAmiName =
-        initialDefaults?.amiName ||
-        `veolms-worker-ami-${amiArch}-${Date.now()}`;
-      customAmiName = await ask(rl, "Pre-baked AMI name", defaultAmiName);
-
-      info(
-        `Building Pre-baked AMI "${bold(customAmiName)}" for ${bold(amiArch)} in ${bold(region)}...`,
-      );
-      try {
-        amiId = await runBuildAmi({
-          region,
-          architecture: amiArch,
-          amiName: customAmiName,
-        });
-        ok(`Pre-baked AMI built successfully: ${bold(green(amiId))}`);
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        warn(`Could not build AMI automatically: ${msg}`);
+      if (amiChoice === "existing") {
+        const enteredAmi = await ask(
+          rl,
+          "Enter existing AMI ID (e.g. ami-0123456789abcdef0)",
+          amiId || undefined,
+        );
+        amiId = enteredAmi.trim() || null;
+        if (amiId) {
+          ok(`Using existing AMI ID: ${bold(amiId)}`);
+        }
+      } else if (amiChoice === "build_now") {
         info(
-          `You can build it manually later: ${cyan("pnpm fleet:build-ami")}`,
+          "Ensuring IAM Worker Role & Instance Profile exist before builder launch...",
+        );
+        const tempIam = createIamClient(region);
+        const workerRoleArn = await checkOrCreateRole(
+          tempIam,
+          storageProvider === "s3" &&
+            s3BucketName !== null &&
+            s3CredentialMode === "automatic",
+          s3CredentialMode === "automatic" ? s3BucketName : null,
+          s3CredentialMode === "automatic" ? s3BuildBucket : null,
+        );
+        await createInstanceProfile(tempIam, workerRoleArn);
+
+        const amiArch = allowedInstanceTypes.some(
+          (t) =>
+            t.startsWith("t4g") ||
+            t.startsWith("c7g") ||
+            t.startsWith("c8g") ||
+            t.startsWith("m7g"),
+        )
+          ? "arm64"
+          : "x86_64";
+        const defaultAmiName =
+          initialDefaults?.amiName ||
+          `veolms-worker-ami-${amiArch}-${Date.now()}`;
+        customAmiName = await ask(rl, "Pre-baked AMI name", defaultAmiName);
+
+        info(
+          `Building Pre-baked AMI "${bold(customAmiName)}" for ${bold(amiArch)} in ${bold(region)}...`,
+        );
+        try {
+          amiId = await runBuildAmi({
+            region,
+            architecture: amiArch,
+            amiName: customAmiName,
+          });
+          ok(`Pre-baked AMI built successfully: ${bold(green(amiId))}`);
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          warn(`Could not build AMI automatically: ${msg}`);
+          info(
+            `You can build it manually later: ${cyan("pnpm fleet:build-ami")}`,
+          );
+        }
+      } else {
+        info(
+          `Skipping AMI build. You can build it later with ${cyan("pnpm fleet:build-ami")}.`,
         );
       }
-    } else {
-      info(
-        `Skipping AMI build. You can build it later with ${cyan("pnpm fleet:build-ami")}.`,
-      );
     }
   }
 
@@ -2483,7 +2870,7 @@ async function runSetupFlow(
     keyName = keyNameInput.trim() || null;
 
     if (keyName) {
-      const ec2 = new EC2Client({ region });
+      const ec2 = createEc2Client(region);
       const keyExists = await checkKeyPair(ec2, keyName);
       if (keyExists) {
         ok(`Found EC2 Key Pair: ${bold(keyName)} in region ${bold(region)}`);
@@ -2533,26 +2920,33 @@ async function runSetupFlow(
 
   // ── Step 14: Spot vs On-Demand ─────────────────────────────────────────────
   step(14, TOTAL_STEPS, "EC2 Pricing Model");
-  const defaultPricingModel =
-    initialDefaults?.useSpot === false ? "on-demand" : "spot";
-  const pricingModel = await askChoice(
-    rl,
-    "Which EC2 pricing model?",
-    [
-      {
-        label:
-          "Spot Instances — Up to 90% cheaper, can be interrupted (recommended for batch video)",
-        value: "spot" as PricingModel,
-      },
-      {
-        label: "On-Demand — Standard pricing, never interrupted",
-        value: "on-demand" as PricingModel,
-      },
-    ],
-    defaultPricingModel === "on-demand" ? 1 : 0,
-  );
-  const useSpot = pricingModel === "spot";
-  ok(useSpot ? "Spot Instances selected." : "On-Demand Instances selected.");
+  let useSpot = false;
+  if (targetEnv === "floci") {
+    info(
+      "Floci has no cloud billing or Spot capacity; using on-demand API semantics.",
+    );
+  } else {
+    const defaultPricingModel =
+      initialDefaults?.useSpot === false ? "on-demand" : "spot";
+    const pricingModel = await askChoice(
+      rl,
+      "Which EC2 pricing model?",
+      [
+        {
+          label:
+            "Spot Instances — Up to 90% cheaper, can be interrupted (recommended for batch video)",
+          value: "spot" as PricingModel,
+        },
+        {
+          label: "On-Demand — Standard pricing, never interrupted",
+          value: "on-demand" as PricingModel,
+        },
+      ],
+      defaultPricingModel === "on-demand" ? 1 : 0,
+    );
+    useSpot = pricingModel === "spot";
+    ok(useSpot ? "Spot Instances selected." : "On-Demand Instances selected.");
+  }
 
   // ── Pre-Provisioning .env Check & User Confirmation ────────────────────────
   const preAnswers: SetupAnswers = {
@@ -2562,6 +2956,7 @@ async function runSetupFlow(
     region,
     accountId: accountId ?? "",
     databaseUrl,
+    containerDatabaseUrl,
     fleetMode,
     lambdaArch,
     setupProbeLambda: shouldSetupProbeLambda,
@@ -2570,6 +2965,11 @@ async function runSetupFlow(
     s3BuildBucket,
     s3BucketAccess,
     s3CredentialMode,
+    s3Endpoint,
+    s3Region,
+    s3AccessKeyId,
+    s3SecretAccessKey,
+    s3ForcePathStyle,
     allowedInstanceTypes,
     bootMode,
     amiId,
@@ -2627,17 +3027,19 @@ You can change them if needed.
   // ── Step 15: Create AWS Resources ─────────────────────────────────────────
   step(15, TOTAL_STEPS, "Creating AWS Resources");
 
-  const iam = new IAMClient({ region });
-  const ec2 = new EC2Client({ region });
-  const cw = new CloudWatchLogsClient({ region });
-  const lambda = new LambdaClient({ region });
+  const iam = createIamClient(region);
+  const ec2 = createEc2Client(region);
+  const cw = createCloudWatchLogsClient(region);
+  const lambda = createLambdaClient(region);
 
   info("Setting up IAM role for EC2 workers and Lambda functions...");
   const workerRoleArn = await checkOrCreateRole(
     iam,
-    storageProvider === "s3" && s3BucketName !== null,
-    s3BucketName,
-    s3BuildBucket,
+    storageProvider === "s3" &&
+      s3BucketName !== null &&
+      s3CredentialMode === "automatic",
+    s3CredentialMode === "automatic" ? s3BucketName : null,
+    s3CredentialMode === "automatic" ? s3BuildBucket : null,
   );
 
   const instanceProfileArn = await createInstanceProfile(iam, workerRoleArn);
@@ -2660,7 +3062,10 @@ You can change them if needed.
     info("Setting up Fleet Manager Lambda function...");
     const lambdaArn = `arn:aws:lambda:${region}:${accountId}:function:${LAMBDA_FUNCTION_NAME}`;
     const lambdaEnvVars: Record<string, string> = {
-      DATABASE_URL: databaseUrl,
+      DATABASE_URL:
+        targetEnv === "floci"
+          ? (containerDatabaseUrl ?? databaseUrl)
+          : databaseUrl,
       FLEET_MODE: "serverless",
       FLEET_PROVIDER: "aws",
       PROVIDER: "aws",
@@ -2669,6 +3074,13 @@ You can change them if needed.
       EC2_USE_SPOT: String(useSpot),
       MAX_WORKERS: String(maxWorkers),
       WORKER_IDLE_POLL_SECONDS: String(workerIdlePollSeconds),
+      // Floci's Docker-backed EC2 boot includes bounded IMDS/SSH package
+      // probes before UserData starts. Give local workers enough time to
+      // install Node.js and FFmpeg; real AWS keeps the normal ten-minute
+      // provisioning budget unless explicitly overridden.
+      PROVISIONING_TIMEOUT_SECONDS:
+        process.env["PROVISIONING_TIMEOUT_SECONDS"] ??
+        (targetEnv === "floci" ? "3600" : "600"),
       SCHEDULER_ROLE_ARN: workerRoleArn,
       LAMBDA_FUNCTION_ARN: lambdaArn,
     };
@@ -2679,6 +3091,25 @@ You can change them if needed.
     if (s3BucketName) {
       lambdaEnvVars["S3_BUCKET"] = s3BucketName;
     }
+    if (targetEnv === "floci") {
+      lambdaEnvVars["S3_FORCE_PATH_STYLE"] = "true";
+    } else {
+      if (s3Endpoint) {
+        lambdaEnvVars["S3_ENDPOINT"] = s3Endpoint;
+      }
+      if (s3Region) {
+        lambdaEnvVars["S3_REGION"] = s3Region;
+      }
+      if (s3AccessKeyId) {
+        lambdaEnvVars["S3_ACCESS_KEY_ID"] = s3AccessKeyId;
+      }
+      if (s3SecretAccessKey) {
+        lambdaEnvVars["S3_SECRET_ACCESS_KEY"] = s3SecretAccessKey;
+      }
+      if (s3ForcePathStyle) {
+        lambdaEnvVars["S3_FORCE_PATH_STYLE"] = s3ForcePathStyle;
+      }
+    }
     if (s3BuildBucket) {
       lambdaEnvVars["S3_BUILD_BUCKET"] = s3BuildBucket;
     }
@@ -2688,12 +3119,12 @@ You can change them if needed.
     if (keyName) {
       lambdaEnvVars["KEY_NAME"] = keyName;
     }
-    if (endpointUrl) {
-      lambdaEnvVars["AWS_ENDPOINT_URL"] = endpointUrl;
-      lambdaEnvVars["AWS_ACCESS_KEY_ID"] = "test";
-      lambdaEnvVars["AWS_SECRET_ACCESS_KEY"] = "test";
-      lambdaEnvVars["AMI_ID"] = LOCALSTACK_DOCKER_AMI_ID;
-      lambdaEnvVars["EC2_VM_MANAGER"] = "docker";
+    if (targetEnv === "floci") {
+      // Floci injects its internal service URL into Lambda containers. A host
+      // URL such as http://localhost:4566 would point back at the Lambda
+      // container, so it must not be copied into function environment vars.
+      lambdaEnvVars["AMI_ID"] = amiId || FLOCI_DEFAULT_AMI_ID;
+      lambdaEnvVars["EC2_USE_SPOT"] = "false";
     } else if (amiId) {
       lambdaEnvVars["AMI_ID"] = amiId;
     }
@@ -2708,32 +3139,33 @@ You can change them if needed.
     if (shouldSetupProbeLambda) {
       info("Checking Docker status for building ffprobe Lambda layer...");
       if (!isDockerRunning()) {
-        warn(
-          "Docker is not running or not installed. Please check that Docker is running to build and publish the ffprobe layer.",
+        throw new Error(
+          "Docker is required to build the ffprobe Lambda layer before deploying the probe Lambda.",
         );
-      } else {
-        try {
-          info(
-            `Building ffprobe layer for architecture ${bold(lambdaArch)} using Docker...`,
-          );
-          const zipPath = buildFfprobeLayer({
-            architecture: lambdaArch,
-            log: true,
-          });
+      }
+      try {
+        info(
+          `Building ffprobe layer for architecture ${bold(lambdaArch)} using Docker...`,
+        );
+        const zipPath = buildFfprobeLayer({
+          architecture: lambdaArch,
+          log: true,
+        });
 
-          info("Publishing veolms-ffprobe layer to AWS Lambda...");
-          ffprobeLayerArn = await publishFfprobeLayer({
-            lambdaClient: lambda,
-            zipPath,
-            architecture: lambdaArch,
-            layerName: "veolms-ffprobe",
-          });
-          ok(`Published layer: ${bold(ffprobeLayerArn)}`);
-        } catch (layerErr: unknown) {
-          const msg =
-            layerErr instanceof Error ? layerErr.message : String(layerErr);
-          warn(`Could not build/publish ffprobe layer: ${msg}`);
-        }
+        info("Publishing veolms-ffprobe layer to AWS Lambda...");
+        ffprobeLayerArn = await publishFfprobeLayer({
+          lambdaClient: lambda,
+          zipPath,
+          architecture: lambdaArch,
+          layerName: "veolms-ffprobe",
+        });
+        ok(`Published layer: ${bold(ffprobeLayerArn)}`);
+      } catch (layerErr: unknown) {
+        const msg =
+          layerErr instanceof Error ? layerErr.message : String(layerErr);
+        throw new Error(`Could not build/publish ffprobe layer: ${msg}`, {
+          cause: layerErr,
+        });
       }
 
       info("Setting up CloudWatch log group for Probe Lambda...");
@@ -2750,8 +3182,31 @@ You can change them if needed.
       if (s3BuildBucket) {
         probeEnvVars["S3_BUILD_BUCKET"] = s3BuildBucket;
       }
-      if (endpointUrl) {
-        probeEnvVars["AWS_ENDPOINT_URL"] = endpointUrl;
+      if (targetEnv === "floci") {
+        probeEnvVars["S3_FORCE_PATH_STYLE"] = "true";
+      } else {
+        if (endpointUrl) {
+          probeEnvVars["AWS_ENDPOINT_URL"] = endpointUrl;
+        }
+        if (s3Endpoint || process.env.S3_ENDPOINT) {
+          probeEnvVars["S3_ENDPOINT"] = (s3Endpoint ||
+            process.env.S3_ENDPOINT)!;
+        }
+        if (s3Region || process.env.S3_REGION) {
+          probeEnvVars["S3_REGION"] = (s3Region || process.env.S3_REGION)!;
+        }
+        if (s3AccessKeyId || process.env.S3_ACCESS_KEY_ID) {
+          probeEnvVars["S3_ACCESS_KEY_ID"] = (s3AccessKeyId ||
+            process.env.S3_ACCESS_KEY_ID)!;
+        }
+        if (s3SecretAccessKey || process.env.S3_SECRET_ACCESS_KEY) {
+          probeEnvVars["S3_SECRET_ACCESS_KEY"] = (s3SecretAccessKey ||
+            process.env.S3_SECRET_ACCESS_KEY)!;
+        }
+        if (s3ForcePathStyle || process.env.S3_FORCE_PATH_STYLE) {
+          probeEnvVars["S3_FORCE_PATH_STYLE"] = (s3ForcePathStyle ||
+            process.env.S3_FORCE_PATH_STYLE)!;
+        }
       }
       probeLambdaArn = await setupProbeLambda(
         region,
@@ -2763,8 +3218,29 @@ You can change them if needed.
     }
   }
 
+  if (
+    storageProvider === "s3" &&
+    s3BucketName &&
+    probeLambdaArn &&
+    (s3CredentialMode === "automatic" || targetEnv === "floci")
+  ) {
+    info("Connecting raw MP4 S3 uploads to the metadata probe Lambda...");
+    await ensureRawVideoS3Trigger({
+      accountId,
+      bucketName: s3BucketName,
+      lambda,
+      probeLambdaArn,
+      region,
+      s3: createS3Client(region),
+    });
+  }
+
   const targetBuildBucket = s3BuildBucket || s3BucketName;
-  if (storageProvider === "s3" && targetBuildBucket) {
+  if (
+    storageProvider === "s3" &&
+    targetBuildBucket &&
+    (s3CredentialMode === "automatic" || targetEnv === "floci")
+  ) {
     info(
       "Building and uploading media worker script and Lambda packages to S3 build bucket...",
     );
@@ -2797,6 +3273,7 @@ You can change them if needed.
     region,
     accountId,
     databaseUrl,
+    containerDatabaseUrl,
     fleetMode,
     lambdaArch,
     setupProbeLambda: shouldSetupProbeLambda,
@@ -2805,6 +3282,11 @@ You can change them if needed.
     s3BuildBucket,
     s3BucketAccess,
     s3CredentialMode,
+    s3Endpoint,
+    s3Region,
+    s3AccessKeyId,
+    s3SecretAccessKey,
+    s3ForcePathStyle,
     allowedInstanceTypes,
     bootMode,
     amiId,
@@ -2827,7 +3309,7 @@ ${bold(cyan("╔═════════════════════�
 ${bold(cyan("║"))}               ${bold(green("AWS Setup Complete!"))}                 ${bold(cyan("║"))}
 ${bold(cyan("╚══════════════════════════════════════════════════════╝"))}
 
-${bold("Resources:")} ${dim(`(target: ${targetEnv === "localstack" ? `LocalStack @ ${endpointUrl}` : `AWS account ${accountId}`})`)}
+${bold("Resources:")} ${dim(`(target: ${targetEnv === "floci" ? `Floci @ ${endpointUrl}` : `AWS account ${accountId}`})`)}
   ${green("✔")} IAM Role:             ${bold(ROLE_NAME)} (Shared by Workers & Lambdas)
   ${green("✔")} Instance Profile:     ${bold(INSTANCE_PROFILE_NAME)}${securityGroupId ? `\n  ${green("✔")} Security Group (SSH): ${bold(`${SECURITY_GROUP_NAME} (${securityGroupId}, port 22)`)}` : ""}${keyName ? `\n  ${green("✔")} EC2 SSH Key Pair:    ${bold(keyName)}` : ""}
   ${green("✔")} Log Group (workers):  ${bold(LOG_GROUP_WORKERS)}
@@ -2877,7 +3359,7 @@ async function runUpdateFlow(
   step(1, 3, "Detecting Current Configuration");
   if (existing.region) {
     info(
-      `Target Environment:   ${bold(existing.targetEnv === "localstack" ? `LocalStack @ ${existing.endpointUrl}` : "Real AWS")}`,
+      `Target Environment:   ${bold(existing.targetEnv === "floci" ? `Floci @ ${existing.endpointUrl}` : "Real AWS")}`,
     );
     info(`AWS Region:           ${bold(existing.region)}`);
     info(`Fleet Mode:           ${bold(existing.fleetMode ?? "serverless")}`);
@@ -2932,7 +3414,12 @@ async function runUpdateFlow(
   }
 
   const targetEnv: TargetEnv = existing.targetEnv ?? "aws";
-  const endpointUrl: string | null = existing.endpointUrl ?? null;
+  const endpointUrl: string | null =
+    existing.targetEnv === "floci"
+      ? (existing.endpointUrl ??
+        resolveFlociEndpoint() ??
+        DEFAULT_FLOCI_ENDPOINT)
+      : null;
   const region: string = existing.region ?? "us-east-1";
   const fleetMode: FleetMode = existing.fleetMode ?? "serverless";
   const lambdaArch: LambdaArchitecture = existing.lambdaArch ?? "arm64";
@@ -2942,7 +3429,16 @@ async function runUpdateFlow(
   const s3BuildBucket: string | null =
     existing.s3BuildBucket ?? existing.s3BucketName ?? null;
   const databaseUrl: string =
-    existing.databaseUrl ?? "postgresql://veolms:veolms@localhost:5433/veolms";
+    existing.databaseUrl ??
+    process.env["DATABASE_URL"] ??
+    DEFAULT_FLOCI_HOST_DATABASE_URL;
+  const containerDatabaseUrl: string | null =
+    targetEnv === "floci"
+      ? resolveFlociContainerDatabaseUrl(
+          databaseUrl,
+          existing.containerDatabaseUrl ?? process.env["FLOCI_DATABASE_URL"],
+        )
+      : null;
   const allowedInstanceTypes: readonly string[] =
     existing.allowedInstanceTypes ?? [
       "c7g.large",
@@ -2951,27 +3447,47 @@ async function runUpdateFlow(
       "c6i.large",
       "c6i.xlarge",
     ];
-  const bootMode: BootMode = existing.bootMode ?? "ami";
-  const amiId: string | null = existing.amiId ?? null;
+  const bootMode: BootMode =
+    existing.targetEnv === "floci" ? "fresh" : (existing.bootMode ?? "ami");
+  const amiId: string | null =
+    existing.targetEnv === "floci"
+      ? FLOCI_DEFAULT_AMI_ID
+      : (existing.amiId ?? null);
   const maxWorkers: number = existing.maxWorkers ?? 8;
   const workerIdlePollSeconds: number = existing.workerIdlePollSeconds ?? 15;
-  const useSpot: boolean = existing.useSpot ?? true;
+  const useSpot: boolean =
+    existing.targetEnv === "floci" ? false : (existing.useSpot ?? true);
   const allowSsh: boolean = existing.allowSsh !== false;
   const keyName: string | null = existing.keyName ?? null;
   const s3CredentialMode: CredentialMode | null =
     existing.s3CredentialMode ?? (s3BucketName ? "automatic" : null);
+  const s3Endpoint: string | null = existing.s3Endpoint ?? null;
+  const s3Region: string | null = existing.s3Region ?? null;
+  const s3AccessKeyId: string | null = existing.s3AccessKeyId ?? null;
+  const s3SecretAccessKey: string | null = existing.s3SecretAccessKey ?? null;
+  const s3ForcePathStyle: string | null = existing.s3ForcePathStyle ?? null;
 
-  if (targetEnv === "localstack" && endpointUrl) {
+  if (targetEnv === "floci" && endpointUrl) {
+    process.env.FLOCI_ENDPOINT = endpointUrl;
     process.env.AWS_ENDPOINT_URL = endpointUrl;
-    process.env.AWS_ACCESS_KEY_ID ??= "test";
-    process.env.AWS_SECRET_ACCESS_KEY ??= "test";
-    process.env.EC2_VM_MANAGER = "docker";
+    process.env.AWS_ACCESS_KEY_ID = "test";
+    process.env.AWS_SECRET_ACCESS_KEY = "test";
+    process.env.S3_ENDPOINT = endpointUrl;
+    process.env.S3_FORCE_PATH_STYLE = "true";
+    process.env.S3_ACCESS_KEY_ID = "test";
+    process.env.S3_SECRET_ACCESS_KEY = "test";
+    delete process.env.AWS_PROFILE;
+    await ensureFlociDocker({ repoRoot, endpoint: endpointUrl });
+  } else {
+    delete process.env.FLOCI_ENDPOINT;
+    delete process.env.AWS_ENDPOINT_URL;
   }
 
   step(2, 3, "Checking AWS Credentials");
   const identity = await checkAwsCredentials(
     region,
     existing.profile ?? undefined,
+    endpointUrl ?? undefined,
   );
   const accountId = identity.accountId;
 
@@ -2981,7 +3497,7 @@ async function runUpdateFlow(
     let lambdaUpdated = false;
     let probeLambdaUpdated = false;
     if (fleetMode === "serverless") {
-      const lambda = new LambdaClient({ region });
+      const lambda = createLambdaClient(region);
       try {
         info(
           `Rebuilding and updating Lambda function ${bold(LAMBDA_FUNCTION_NAME)} code...`,
@@ -3027,7 +3543,11 @@ async function runUpdateFlow(
 
     let bundleUploaded = false;
     const targetBuildBucket = s3BuildBucket || s3BucketName;
-    if (storageProvider === "s3" && targetBuildBucket) {
+    if (
+      storageProvider === "s3" &&
+      targetBuildBucket &&
+      (s3CredentialMode === "automatic" || targetEnv === "floci")
+    ) {
       info(
         `Rebuilding and uploading build artifacts to ${bold(targetBuildBucket)}...`,
       );
@@ -3057,16 +3577,18 @@ ${bold("Next Steps:")}
   }
 
   // Full update
-  const iam = new IAMClient({ region });
-  const ec2 = new EC2Client({ region });
-  const cw = new CloudWatchLogsClient({ region });
+  const iam = createIamClient(region);
+  const ec2 = createEc2Client(region);
+  const cw = createCloudWatchLogsClient(region);
 
   info("Updating / verifying IAM role policies for EC2 workers...");
   const workerRoleArn = await checkOrCreateRole(
     iam,
-    storageProvider === "s3" && s3BucketName !== null,
-    s3BucketName,
-    s3BuildBucket,
+    storageProvider === "s3" &&
+      s3BucketName !== null &&
+      s3CredentialMode === "automatic",
+    s3CredentialMode === "automatic" ? s3BucketName : null,
+    s3CredentialMode === "automatic" ? s3BuildBucket : null,
   );
 
   const instanceProfileArn = await createInstanceProfile(iam, workerRoleArn);
@@ -3086,8 +3608,12 @@ ${bold("Next Steps:")}
   let ffprobeLayerArn: string | null = null;
   if (fleetMode === "serverless") {
     info("Updating Lambda function code & configuration...");
+    const lambdaArn = `arn:aws:lambda:${region}:${accountId}:function:${LAMBDA_FUNCTION_NAME}`;
     const lambdaEnvVars: Record<string, string> = {
-      DATABASE_URL: databaseUrl,
+      DATABASE_URL:
+        targetEnv === "floci"
+          ? (containerDatabaseUrl ?? databaseUrl)
+          : databaseUrl,
       FLEET_MODE: "serverless",
       FLEET_PROVIDER: "aws",
       PROVIDER: "aws",
@@ -3096,6 +3622,11 @@ ${bold("Next Steps:")}
       EC2_USE_SPOT: String(useSpot),
       MAX_WORKERS: String(maxWorkers),
       WORKER_IDLE_POLL_SECONDS: String(workerIdlePollSeconds),
+      PROVISIONING_TIMEOUT_SECONDS:
+        process.env["PROVISIONING_TIMEOUT_SECONDS"] ??
+        (targetEnv === "floci" ? "3600" : "600"),
+      SCHEDULER_ROLE_ARN: workerRoleArn,
+      LAMBDA_FUNCTION_ARN: lambdaArn,
     };
     if (allowedInstanceTypes.length > 0) {
       lambdaEnvVars["EC2_ALLOWED_INSTANCE_TYPES"] =
@@ -3103,6 +3634,28 @@ ${bold("Next Steps:")}
     }
     if (s3BucketName) {
       lambdaEnvVars["S3_BUCKET"] = s3BucketName;
+    }
+    if (targetEnv === "floci") {
+      // Floci injects its internal service URL into Lambda containers. A host
+      // URL such as http://localhost:4566 would point back at the Lambda
+      // container, so keep host-side endpoint and credentials out of it.
+      lambdaEnvVars["S3_FORCE_PATH_STYLE"] = "true";
+    } else {
+      if (s3Endpoint) {
+        lambdaEnvVars["S3_ENDPOINT"] = s3Endpoint;
+      }
+      if (s3Region) {
+        lambdaEnvVars["S3_REGION"] = s3Region;
+      }
+      if (s3AccessKeyId) {
+        lambdaEnvVars["S3_ACCESS_KEY_ID"] = s3AccessKeyId;
+      }
+      if (s3SecretAccessKey) {
+        lambdaEnvVars["S3_SECRET_ACCESS_KEY"] = s3SecretAccessKey;
+      }
+      if (s3ForcePathStyle) {
+        lambdaEnvVars["S3_FORCE_PATH_STYLE"] = s3ForcePathStyle;
+      }
     }
     if (s3BuildBucket) {
       lambdaEnvVars["S3_BUILD_BUCKET"] = s3BuildBucket;
@@ -3113,12 +3666,12 @@ ${bold("Next Steps:")}
     if (keyName) {
       lambdaEnvVars["KEY_NAME"] = keyName;
     }
-    if (endpointUrl) {
-      lambdaEnvVars["AWS_ENDPOINT_URL"] = endpointUrl;
-      lambdaEnvVars["AWS_ACCESS_KEY_ID"] = "test";
-      lambdaEnvVars["AWS_SECRET_ACCESS_KEY"] = "test";
-      lambdaEnvVars["AMI_ID"] = LOCALSTACK_DOCKER_AMI_ID;
-      lambdaEnvVars["EC2_VM_MANAGER"] = "docker";
+    if (targetEnv === "floci") {
+      // Floci injects its internal service URL into Lambda containers. A host
+      // URL such as http://localhost:4566 would point back at the Lambda
+      // container, so it must not be copied into function environment vars.
+      lambdaEnvVars["AMI_ID"] = amiId || FLOCI_DEFAULT_AMI_ID;
+      lambdaEnvVars["EC2_USE_SPOT"] = "false";
     } else if (amiId) {
       lambdaEnvVars["AMI_ID"] = amiId;
     }
@@ -3132,39 +3685,39 @@ ${bold("Next Steps:")}
     if (shouldSetupProbeLambda) {
       info("Checking Docker status for building ffprobe Lambda layer...");
       if (!isDockerRunning()) {
-        warn(
-          "Docker is not running or not installed. Please check that Docker is running to build and publish the ffprobe layer.",
+        throw new Error(
+          "Docker is required to build the ffprobe Lambda layer before deploying the probe Lambda.",
         );
-      } else {
-        try {
-          info(
-            `Building ffprobe layer for architecture ${bold(lambdaArch)} using Docker...`,
-          );
-          const zipPath = buildFfprobeLayer({
-            architecture: lambdaArch,
-            log: true,
-          });
-
-          const lambdaClient = new LambdaClient({ region });
-          info("Publishing veolms-ffprobe layer to AWS Lambda...");
-          ffprobeLayerArn = await publishFfprobeLayer({
-            lambdaClient,
-            zipPath,
-            architecture: lambdaArch,
-            layerName: "veolms-ffprobe",
-          });
-          ok(`Published layer: ${bold(ffprobeLayerArn)}`);
-        } catch (layerErr: unknown) {
-          const msg =
-            layerErr instanceof Error ? layerErr.message : String(layerErr);
-          warn(`Could not build/publish ffprobe layer: ${msg}`);
-        }
+      }
+      try {
+        info(
+          `Building ffprobe layer for architecture ${bold(lambdaArch)} using Docker...`,
+        );
+        const zipPath = buildFfprobeLayer({
+          architecture: lambdaArch,
+          log: true,
+        });
+        const lambdaClient = createLambdaClient(region);
+        info("Publishing veolms-ffprobe layer to AWS Lambda...");
+        ffprobeLayerArn = await publishFfprobeLayer({
+          lambdaClient,
+          zipPath,
+          architecture: lambdaArch,
+          layerName: "veolms-ffprobe",
+        });
+        ok(`Published layer: ${bold(ffprobeLayerArn)}`);
+      } catch (layerErr: unknown) {
+        const msg =
+          layerErr instanceof Error ? layerErr.message : String(layerErr);
+        throw new Error(`Could not build/publish ffprobe layer: ${msg}`, {
+          cause: layerErr,
+        });
       }
 
-      info("Setting up CloudWatch log group for Probe Lambda...");
+      info("Ensuring CloudWatch log group for Probe Lambda...");
       await ensureLogGroup(cw, LOG_GROUP_PROBE);
 
-      info("Setting up Video Metadata Probe Lambda function...");
+      info("Updating Video Metadata Probe Lambda function...");
       const probeEnvVars: Record<string, string> = {
         FLEET_MANAGER_LAMBDA_NAME: LAMBDA_FUNCTION_NAME,
       };
@@ -3175,8 +3728,35 @@ ${bold("Next Steps:")}
       if (s3BuildBucket) {
         probeEnvVars["S3_BUILD_BUCKET"] = s3BuildBucket;
       }
-      if (endpointUrl) {
-        probeEnvVars["AWS_ENDPOINT_URL"] = endpointUrl;
+      if (targetEnv === "floci") {
+        probeEnvVars["S3_FORCE_PATH_STYLE"] = "true";
+      } else {
+        if (endpointUrl) {
+          probeEnvVars["AWS_ENDPOINT_URL"] = endpointUrl;
+        }
+        const configuredS3Endpoint = s3Endpoint ?? process.env.S3_ENDPOINT;
+        const configuredS3Region = s3Region ?? process.env.S3_REGION;
+        const configuredS3AccessKeyId =
+          s3AccessKeyId ?? process.env.S3_ACCESS_KEY_ID;
+        const configuredS3SecretAccessKey =
+          s3SecretAccessKey ?? process.env.S3_SECRET_ACCESS_KEY;
+        const configuredS3ForcePathStyle =
+          s3ForcePathStyle ?? process.env.S3_FORCE_PATH_STYLE;
+        if (configuredS3Endpoint) {
+          probeEnvVars["S3_ENDPOINT"] = configuredS3Endpoint;
+        }
+        if (configuredS3Region) {
+          probeEnvVars["S3_REGION"] = configuredS3Region;
+        }
+        if (configuredS3AccessKeyId) {
+          probeEnvVars["S3_ACCESS_KEY_ID"] = configuredS3AccessKeyId;
+        }
+        if (configuredS3SecretAccessKey) {
+          probeEnvVars["S3_SECRET_ACCESS_KEY"] = configuredS3SecretAccessKey;
+        }
+        if (configuredS3ForcePathStyle) {
+          probeEnvVars["S3_FORCE_PATH_STYLE"] = configuredS3ForcePathStyle;
+        }
       }
       probeLambdaArn = await setupProbeLambda(
         region,
@@ -3188,8 +3768,29 @@ ${bold("Next Steps:")}
     }
   }
 
+  if (
+    storageProvider === "s3" &&
+    s3BucketName &&
+    probeLambdaArn &&
+    (s3CredentialMode === "automatic" || targetEnv === "floci")
+  ) {
+    info("Connecting raw MP4 S3 uploads to the metadata probe Lambda...");
+    await ensureRawVideoS3Trigger({
+      accountId,
+      bucketName: s3BucketName,
+      lambda: createLambdaClient(region),
+      probeLambdaArn,
+      region,
+      s3: createS3Client(region),
+    });
+  }
+
   const targetBuildBucket = s3BuildBucket || s3BucketName;
-  if (storageProvider === "s3" && targetBuildBucket) {
+  if (
+    storageProvider === "s3" &&
+    targetBuildBucket &&
+    (s3CredentialMode === "automatic" || targetEnv === "floci")
+  ) {
     info("Rebuilding and uploading build artifacts to S3 build bucket...");
     await buildAndUploadBuildArtifacts({
       buildBucketName: targetBuildBucket,
@@ -3206,6 +3807,7 @@ ${bold("Next Steps:")}
     region,
     accountId,
     databaseUrl,
+    containerDatabaseUrl,
     fleetMode,
     lambdaArch,
     setupProbeLambda: shouldSetupProbeLambda,
@@ -3213,6 +3815,11 @@ ${bold("Next Steps:")}
     s3BucketName,
     s3BuildBucket,
     s3CredentialMode,
+    s3Endpoint,
+    s3Region,
+    s3AccessKeyId,
+    s3SecretAccessKey,
+    s3ForcePathStyle,
     allowedInstanceTypes,
     bootMode,
     amiId,
@@ -3246,7 +3853,7 @@ ${bold(cyan("╔═════════════════════�
 ${bold(cyan("║"))}         ${bold(green("AWS Infrastructure Updated Successfully!"))}      ${bold(cyan("║"))}
 ${bold(cyan("╚══════════════════════════════════════════════════════╝"))}
 
-${bold("Resources Updated:")} ${dim(`(target: ${targetEnv === "localstack" ? `LocalStack @ ${endpointUrl}` : `AWS account ${accountId}`})`)}
+${bold("Resources Updated:")} ${dim(`(target: ${targetEnv === "floci" ? `Floci @ ${endpointUrl}` : `AWS account ${accountId}`})`)}
   ${green("✔")} IAM Role:             ${bold(ROLE_NAME)}
   ${green("✔")} Instance Profile:     ${bold(INSTANCE_PROFILE_NAME)}${securityGroupId ? `\n  ${green("✔")} Security Group (SSH): ${bold(`${SECURITY_GROUP_NAME} (${securityGroupId}, port 22)`)}` : ""}${keyName ? `\n  ${green("✔")} EC2 SSH Key Pair:    ${bold(keyName)}` : ""}
   ${green("✔")} Log Group (workers):  ${bold(LOG_GROUP_WORKERS)}
@@ -3270,9 +3877,8 @@ async function runDestroyFlow(
 ): Promise<void> {
   const existing = loadExistingConfig(repoRoot);
   const targetEnv =
-    existing.targetEnv ?? (process.env.AWS_ENDPOINT_URL ? "localstack" : "aws");
-  const endpointUrl =
-    existing.endpointUrl ?? process.env.AWS_ENDPOINT_URL ?? null;
+    existing.targetEnv ?? (resolveFlociEndpoint() ? "floci" : "aws");
+  const endpointUrl = existing.endpointUrl ?? resolveFlociEndpoint() ?? null;
   const region = existing.region ?? process.env.AWS_REGION ?? "us-east-1";
   const s3BucketName =
     existing.s3BucketName ?? resolveS3BucketName(process.env);
@@ -3282,7 +3888,7 @@ async function runDestroyFlow(
   console.log(`\n${bold(red("⚠ Teardown Confirmation"))}`);
   console.log(dim("─".repeat(52)));
   console.log(
-    `  Target:     ${bold(targetEnv === "localstack" ? `LocalStack @ ${endpointUrl}` : "Real AWS")}`,
+    `  Target:     ${bold(targetEnv === "floci" ? `Floci @ ${endpointUrl}` : "Real AWS")}`,
   );
   console.log(`  Region:     ${bold(region)}`);
   if (s3BucketName) {

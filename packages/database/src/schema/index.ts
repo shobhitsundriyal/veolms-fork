@@ -2,6 +2,7 @@ import type { Kysely, Transaction } from "kysely";
 
 // Re-export all domain schema types
 export * from "./auth.schema.ts";
+export * from "./authorization.schema.ts";
 export * from "./courses.schema.ts";
 export * from "./media.schema.ts";
 export * from "./commerce.schema.ts";
@@ -10,17 +11,16 @@ export * from "./webhooks.schema.ts";
 export * from "./notifications.schema.ts";
 export * from "./json.schema.ts";
 export * from "./fleet.schema.ts";
-export * from "./learning-space.schema.ts";
+export * from "./quizzes.schema.ts";
 export * from "./learning-progress.schema.ts";
 
 // Import table interfaces to assemble unified Database schema
 import type {
   AcademyTable,
   UserTable,
-  RoleTable,
   UserRoleTable,
   MenuTable,
-  PermissionTable,
+  MenuPermissionTable,
   SessionTable,
   OauthAccountTable,
   OtpCodeTable,
@@ -29,6 +29,14 @@ import type {
   MfaBackupCodeTable,
   WebauthnChallengeTable,
 } from "./auth.schema.ts";
+
+import type {
+  PermissionTable,
+  RoleTable,
+  RolePermissionTable,
+  RoleAssignmentTable,
+  FeatureTable,
+} from "./authorization.schema.ts";
 
 import type {
   CourseTable,
@@ -44,7 +52,11 @@ import type {
   CourseDeletionStorageItemTable,
 } from "./courses.schema.ts";
 
-import type { MediaAssetTable, VideoOutputTable } from "./media.schema.ts";
+import type {
+  ImageJobTable,
+  MediaAssetTable,
+  VideoOutputTable,
+} from "./media.schema.ts";
 
 import type {
   CourseBundleTable,
@@ -98,17 +110,29 @@ import type {
   WorkerTable,
   FleetTestControlTable,
 } from "./fleet.schema.ts";
-import type { LearningSpaceSessionTable } from "./learning-space.schema.ts";
+import type {
+  QuizTable,
+  QuizVersionTable,
+  QuizQuestionTable,
+  QuizQuestionOptionTable,
+  QuizAssignmentTable,
+  QuizAttemptTable,
+  QuizAttemptAnswerTable,
+} from "./quizzes.schema.ts";
 import type { LearningProgressTable } from "./learning-progress.schema.ts";
 
 export interface Database {
-  // Auth & Academy
+  // Auth & Roles
   academy: AcademyTable;
   users: UserTable;
   roles: RoleTable;
   user_roles: UserRoleTable;
   menus: MenuTable;
+  menu_permissions: MenuPermissionTable;
   permissions: PermissionTable;
+  role_permissions: RolePermissionTable;
+  role_assignments: RoleAssignmentTable;
+  features: FeatureTable;
   sessions: SessionTable;
   oauth_accounts: OauthAccountTable;
   otp_codes: OtpCodeTable;
@@ -132,6 +156,7 @@ export interface Database {
 
   // Media & Video Processing
   media_assets: MediaAssetTable;
+  image_jobs: ImageJobTable;
   video_outputs: VideoOutputTable;
 
   // Commerce, Orders & Payments
@@ -184,7 +209,13 @@ export interface Database {
   fleet_test_controls: FleetTestControlTable;
 
   // Learner state
-  learning_space_sessions: LearningSpaceSessionTable;
+  quizzes: QuizTable;
+  quiz_versions: QuizVersionTable;
+  quiz_questions: QuizQuestionTable;
+  quiz_question_options: QuizQuestionOptionTable;
+  quiz_assignments: QuizAssignmentTable;
+  quiz_attempts: QuizAttemptTable;
+  quiz_attempt_answers: QuizAttemptAnswerTable;
   learning_progress: LearningProgressTable;
 }
 

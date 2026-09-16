@@ -19,10 +19,15 @@
         "s3:GetPublicAccessBlock",
         "s3:PutObject",
         "s3:GetObject",
-        "s3:HeadObject",
         "s3:DeleteObject"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "S3MediaBucketNotificationManagement",
+      "Effect": "Allow",
+      "Action": ["s3:GetBucketNotification", "s3:PutBucketNotification"],
+      "Resource": "arn:aws:s3:::${S3_BUCKET}"
     },
     {
       "Sid": "IAMRoleAndInstanceProfileManagement",
@@ -65,7 +70,7 @@
       }
     },
     {
-      "Sid": "LambdaFunctionAndLayerManagement",
+      "Sid": "LambdaFunctionManagement",
       "Effect": "Allow",
       "Action": [
         "lambda:CreateFunction",
@@ -74,15 +79,38 @@
         "lambda:UpdateFunctionCode",
         "lambda:UpdateFunctionConfiguration",
         "lambda:DeleteFunction",
-        "lambda:PublishLayerVersion",
-        "lambda:GetLayerVersion",
-        "lambda:DeleteLayerVersion",
         "lambda:TagResource",
         "lambda:InvokeFunction"
       ],
       "Resource": [
-        "arn:aws:lambda:*:*:function:veolms-*",
-        "arn:aws:lambda:*:*:layer:veolms-*"
+        "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:veolms-fleet-manager",
+        "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:veolms-video-metadata-probe"
+      ]
+    },
+    {
+      "Sid": "LambdaPermissionManagement",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:AddPermission",
+        "lambda:RemovePermission"
+      ],
+      "Resource": [
+        "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:veolms-fleet-manager",
+        "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:veolms-video-metadata-probe"
+      ]
+    },
+    {
+      "Sid": "LambdaLayerManagement",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:PublishLayerVersion",
+        "lambda:GetLayerVersion",
+        "lambda:DeleteLayerVersion",
+        "lambda:TagResource"
+      ],
+      "Resource": [
+        "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:layer:veolms-ffprobe",
+        "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:layer:veolms-ffprobe:*"
       ]
     },
     {

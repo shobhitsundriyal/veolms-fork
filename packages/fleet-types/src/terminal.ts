@@ -146,6 +146,141 @@ export async function ask(
   return trimmed === "" && defaultVal !== undefined ? defaultVal : trimmed;
 }
 
+interface SecretTerminalInput {
+  readonly isTTY?: boolean;
+  readonly isRaw?: boolean;
+  setRawMode(mode: boolean): unknown;
+  isPaused(): boolean;
+  pause(): unknown;
+  resume(): unknown;
+  on(event: "data", listener: (chunk: unknown) => void): unknown;
+  off(event: "data", listener: (chunk: unknown) => void): unknown;
+  listeners(event: "data"): Array<(chunk: unknown) => void>;
+}
+
+interface SecretTerminalOutput {
+  write(chunk: string): unknown;
+}
+
+function readSecretInput(
+  rl: ReadlineInterface,
+  question: string,
+): Promise<string> {
+  const { input, output } = rl as unknown as {
+    input?: SecretTerminalInput;
+    output?: SecretTerminalOutput;
+  };
+
+  if (
+    !input ||
+    input.isTTY !== true ||
+    typeof input.setRawMode !== "function" ||
+    !output ||
+    typeof output.write !== "function"
+  ) {
+    throw new Error("Interactive secret input requires a TTY.");
+  }
+
+  output.write(`  ${bold("?")} ${question}: `);
+
+  const wasRaw = input.isRaw === true;
+  const wasPaused = input.isPaused();
+  const existingDataListeners = input.listeners("data");
+  let value = "";
+
+  return new Promise<string>((resolve, reject) => {
+    let settled = false;
+
+    const cleanup = (): void => {
+      input.off("data", onData);
+      let cleanupError: unknown;
+      try {
+        input.setRawMode(wasRaw);
+      } catch (error: unknown) {
+        cleanupError = error;
+      }
+      for (const listener of existingDataListeners) {
+        input.on("data", listener);
+      }
+      if (wasPaused) input.pause();
+      else input.resume();
+      output.write("\n");
+      if (cleanupError) throw cleanupError;
+    };
+
+    const finish = (error?: unknown): void => {
+      if (settled) return;
+      settled = true;
+      try {
+        cleanup();
+      } catch (cleanupError: unknown) {
+        error ??= cleanupError;
+      }
+      if (error) reject(error);
+      else resolve(value);
+    };
+
+    const onData = (chunk: unknown): void => {
+      const text =
+        typeof chunk === "string"
+          ? chunk
+          : Buffer.isBuffer(chunk)
+            ? chunk.toString("utf8")
+            : chunk instanceof Uint8Array
+              ? Buffer.from(chunk).toString("utf8")
+              : String(chunk);
+
+      for (const char of text) {
+        if (char === "\r" || char === "\n") {
+          finish();
+        } else if (char === "\u0003") {
+          finish(new Error("Secret prompt cancelled."));
+        } else if (char === "\u0008" || char === "\u007f") {
+          value = value.slice(0, -1);
+        } else if (char === "\u0015") {
+          value = "";
+        } else if (char >= " ") {
+          value += char;
+        }
+        if (settled) break;
+      }
+    };
+
+    try {
+      for (const listener of existingDataListeners) {
+        input.off("data", listener);
+      }
+      input.setRawMode(true);
+      input.on("data", onData);
+      input.resume();
+    } catch (error: unknown) {
+      finish(error);
+    }
+  });
+}
+
+/**
+ * Prompts for a secret without ever including its default or entered value in
+ * the prompt, hint, or non-interactive log output.
+ */
+export async function askSecret(
+  rl: ReadlineInterface | undefined,
+  question: string,
+  defaultVal?: string,
+  nonInteractive?: boolean,
+): Promise<string> {
+  const isNonInter = nonInteractive ?? (!rl || isNonInteractive());
+  if (isNonInter || !rl) {
+    const status = defaultVal ? green("[configured]") : "";
+    console.log(`  ${bold("?")} ${question}: ${status}`);
+    return defaultVal ?? "";
+  }
+
+  const answer = await readSecretInput(rl, question);
+  const trimmed = answer.replace(/\r$/, "").trim();
+  return trimmed === "" && defaultVal !== undefined ? defaultVal : trimmed;
+}
+
 /**
  * Prompts user to select from a numbered list of choices, with default selection
  * and cross-platform line-ending handling.
