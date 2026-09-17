@@ -1,17 +1,14 @@
 import { sql, type Kysely } from "kysely";
 
+/**
+ * Historical migration name retained because it has already been applied by
+ * existing databases. The timestamped equivalent remains for databases that
+ * were created after the fleet migrations were renumbered.
+ */
 export async function up(database: Kysely<unknown>): Promise<void> {
-  // 011-create-fleet-manager-tables.ts creates these tables and constraints.
-  // This migration upgrades databases that ran the old fleet migration.
-  await sql`alter table workers drop constraint if exists workers_provider_valid`.execute(
-    database,
-  );
-  await sql`alter table workers add constraint workers_provider_valid check (provider in ('local', 'docker', 'aws'))`.execute(
-    database,
-  );
-  await sql`alter table worker_events drop constraint if exists worker_events_event_valid`.execute(
-    database,
-  );
+  await sql`alter table workers drop constraint if exists workers_provider_valid`.execute(database);
+  await sql`alter table workers add constraint workers_provider_valid check (provider in ('local', 'docker', 'aws'))`.execute(database);
+  await sql`alter table worker_events drop constraint if exists worker_events_event_valid`.execute(database);
   await sql`alter table worker_events add constraint worker_events_event_valid check (event in (
     'worker_created', 'worker_provisioning', 'worker_ready', 'job_assigned',
     'job_started', 'progress_updated', 'heartbeat_recorded', 'heartbeat_timeout',
@@ -42,16 +39,8 @@ export async function up(database: Kysely<unknown>): Promise<void> {
 }
 
 export async function down(database: Kysely<unknown>): Promise<void> {
-  await sql`
-    delete from worker_events
-    where worker_id in (select id from workers where provider = 'docker')
-       or event in ('test_fault_requested', 'test_fault_applied')
-  `.execute(database);
-  await sql`delete from workers where provider = 'docker'`.execute(database);
   await database.schema.dropTable("fleet_test_controls").ifExists().execute();
-  await sql`alter table worker_events drop constraint if exists worker_events_event_valid`.execute(
-    database,
-  );
+  await sql`alter table worker_events drop constraint if exists worker_events_event_valid`.execute(database);
   await sql`alter table worker_events add constraint worker_events_event_valid check (event in (
     'worker_created', 'worker_provisioning', 'worker_ready', 'job_assigned',
     'job_started', 'progress_updated', 'heartbeat_recorded', 'heartbeat_timeout',
@@ -60,10 +49,6 @@ export async function down(database: Kysely<unknown>): Promise<void> {
     'orphan_instance_terminated', 'job_output_verified',
     'job_output_verification_failed'
   ))`.execute(database);
-  await sql`alter table workers drop constraint if exists workers_provider_valid`.execute(
-    database,
-  );
-  await sql`alter table workers add constraint workers_provider_valid check (provider in ('local', 'aws'))`.execute(
-    database,
-  );
+  await sql`alter table workers drop constraint if exists workers_provider_valid`.execute(database);
+  await sql`alter table workers add constraint workers_provider_valid check (provider in ('local', 'aws'))`.execute(database);
 }
