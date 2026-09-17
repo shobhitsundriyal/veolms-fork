@@ -1,9 +1,49 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLocalProvider, parsePidFromWorkerId } from "../src/provider.ts";
+
+function createMockRl(responses: string[], secret: string) {
+  const input = new EventEmitter() as EventEmitter & {
+    isTTY: boolean;
+    isRaw: boolean;
+    isPaused: () => boolean;
+    setRawMode: (mode: boolean) => EventEmitter;
+  };
+  let paused = false;
+  input.isTTY = true;
+  input.isRaw = false;
+  input.isPaused = () => paused;
+  input.pause = () => {
+    paused = true;
+    return input;
+  };
+  input.resume = () => {
+    paused = false;
+    return input;
+  };
+  input.setRawMode = (mode: boolean) => {
+    input.isRaw = mode;
+    return input;
+  };
+  const originalOn = input.on.bind(input);
+  input.on = ((event: string, listener: (...args: any[]) => void) => {
+    const result = originalOn(event, listener);
+    if (event === "data") {
+      queueMicrotask(() => input.emit("data", `${secret}\r\n`));
+    }
+    return result;
+  }) as typeof input.on;
+  const output = { write: () => true };
+  return {
+    question: async () => responses.shift() ?? "",
+    input,
+    output,
+  } as any;
+}
 
 describe("Local Fleet Provider", () => {
   it("should parse PID from worker provider ID", () => {
@@ -129,9 +169,7 @@ describe("Local Fleet Provider", () => {
       "postgresql://test:test@localhost:5432/test", // db url
       "1", // local storage
     ];
-    const mockRl = {
-      question: async () => responses.shift() ?? "",
-    } as any;
+    const mockRl = createMockRl(responses, "");
 
     const tempDir = await mkdtemp(join(tmpdir(), "veolms-local-env-test-"));
     try {
@@ -158,12 +196,9 @@ describe("Local Fleet Provider", () => {
       "http://localhost:9000", // endpoint
       "us-east-1", // region
       "minioadmin", // access key
-      "miniopassword", // secret key
       "1", // path style: true
     ];
-    const mockRl = {
-      question: async () => responses.shift() ?? "",
-    } as any;
+    const mockRl = createMockRl(responses, "miniopassword");
 
     const tempDir = await mkdtemp(join(tmpdir(), "veolms-local-env-test-"));
     try {
@@ -185,9 +220,7 @@ describe("Local Fleet Provider", () => {
   it("uses ProviderConfigOptions.env as the storage default without writing the real checkout", async () => {
     const { configureEnv } = await import("../src/setup/index.ts");
     const responses = ["postgresql://test:test@localhost:5432/test", ""];
-    const mockRl = {
-      question: async () => responses.shift() ?? "",
-    } as any;
+    const mockRl = createMockRl(responses, "");
     const tempDir = await mkdtemp(join(tmpdir(), "veolms-local-env-test-"));
 
     try {
