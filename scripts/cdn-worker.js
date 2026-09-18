@@ -23,9 +23,9 @@
  * - public|protected/thumbnails/{mediaId}/full.webp
  * - public|protected/thumbnails/{mediaId}/{width}.webp
  *
- * Profile avatar objects use flat per-user keys:
- * - public/avatars/{userId}/original.{extension}
- * - public/avatars/{userId}/{width}.webp
+ * Profile avatar objects use one namespace segment per avatar:
+ * - public/avatars/{userId--avatarId}/original.{extension}
+ * - public/avatars/{userId--avatarId}/{width}.webp
  *
  * Avatar variants use stable URLs but are deliberately bypassed in the
  * Worker cache and returned with no-store so replacing the original cannot

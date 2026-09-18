@@ -28,6 +28,7 @@ import type {
   UserTotpCredentialTable,
   MfaBackupCodeTable,
   WebauthnChallengeTable,
+  UserAvatarTable,
 } from "./auth.schema.ts";
 
 import type {
@@ -140,6 +141,7 @@ export interface Database {
   user_totp_credentials: UserTotpCredentialTable;
   mfa_backup_codes: MfaBackupCodeTable;
   webauthn_challenges: WebauthnChallengeTable;
+  user_avatars: UserAvatarTable;
 
   // Courses & Curriculum
   courses: CourseTable;
