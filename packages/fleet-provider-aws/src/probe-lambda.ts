@@ -7,6 +7,11 @@ import type {
 } from "@veolms/contracts";
 import { videoJobEventSchema } from "@veolms/contracts";
 import { probeVideoMetadata, resolveS3VideoUrl } from "./prober.ts";
+import {
+  awsS3ClientOptions,
+  awsServiceClientOptions,
+  resolveFlociEndpoint,
+} from "./floci.ts";
 
 export interface ProbeLambdaConfig {
   readonly region?: string;
@@ -267,10 +272,7 @@ export async function processProbeAndForward(
     process.env["S3_BUCKET"] ??
     process.env["STORAGE_BUCKET"];
 
-  const s3Endpoint =
-    process.env["S3_ENDPOINT"] ||
-    process.env["AWS_ENDPOINT_URL"] ||
-    process.env["LOCALSTACK_ENDPOINT"];
+  const s3Endpoint = process.env["S3_ENDPOINT"] || resolveFlociEndpoint();
   const s3AccessKeyId = process.env["S3_ACCESS_KEY_ID"];
   const s3SecretAccessKey = process.env["S3_SECRET_ACCESS_KEY"];
   const s3Credentials =
@@ -278,25 +280,24 @@ export async function processProbeAndForward(
       ? { accessKeyId: s3AccessKeyId, secretAccessKey: s3SecretAccessKey }
       : undefined;
 
-  const endpoint =
-    process.env["AWS_ENDPOINT_URL"] || process.env["LOCALSTACK_ENDPOINT"];
+  const endpoint = resolveFlociEndpoint();
   const lambda =
     customConfig.lambdaClient ??
     new LambdaClient({
-      region,
-      ...(endpoint ? { endpoint } : {}),
+      ...(endpoint ? awsServiceClientOptions(region) : { region }),
     });
   const s3 =
     customConfig.s3Client ??
     new S3Client({
-      region: process.env["S3_REGION"] || region,
-      ...(s3Endpoint
+      ...(endpoint
+        ? awsS3ClientOptions(process.env["S3_REGION"] || region)
+        : { region: process.env["S3_REGION"] || region }),
+      ...(!endpoint && s3Endpoint
         ? {
             endpoint: s3Endpoint,
             forcePathStyle:
               process.env["S3_FORCE_PATH_STYLE"] === "true" ||
-              Boolean(process.env["S3_ENDPOINT"]) ||
-              Boolean(process.env["AWS_ENDPOINT_URL"]),
+              Boolean(process.env["S3_ENDPOINT"]),
           }
         : {}),
       ...(s3Credentials ? { credentials: s3Credentials } : {}),
@@ -374,7 +375,9 @@ export async function processProbeAndForward(
         videoUrl = await resolveS3VideoUrl(s3, s3Bucket, cleanVideoKey);
       }
 
-      console.info(`[probe-lambda] Probing video metadata for: ${cleanVideoKey}`);
+      console.info(
+        `[probe-lambda] Probing video metadata for: ${cleanVideoKey}`,
+      );
       videoMetadata = await probeVideoMetadata(videoUrl, {
         ffprobePath: customConfig.ffprobePath,
       });

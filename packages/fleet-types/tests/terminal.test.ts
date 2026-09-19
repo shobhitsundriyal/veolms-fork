@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { EventEmitter } from "node:events";
 import {
   ask,
   askChoice,
+  askSecret,
   banner,
   bold,
   cyan,
@@ -18,6 +20,33 @@ import {
   warn,
   yellow,
 } from "../src/terminal.ts";
+
+function createSecretReadline(answer: string) {
+  const input = new EventEmitter() as EventEmitter & {
+    isTTY: boolean;
+    isRaw: boolean;
+    isPaused: () => boolean;
+    setRawMode: (mode: boolean) => EventEmitter;
+  };
+  let paused = false;
+  input.isTTY = true;
+  input.isRaw = false;
+  input.isPaused = () => paused;
+  input.pause = () => {
+    paused = true;
+    return input;
+  };
+  input.resume = () => {
+    paused = false;
+    return input;
+  };
+  input.setRawMode = (mode: boolean) => {
+    input.isRaw = mode;
+    return input;
+  };
+  const output = { write: () => true };
+  return { input, output, rl: { input, output } as any, answer };
+}
 
 describe("Terminal & Readline Helpers", () => {
   it("formats ANSI escape strings correctly", () => {
@@ -72,6 +101,27 @@ describe("Terminal & Readline Helpers", () => {
 
     const res = await ask(mockRl, "Enter value", "fallback", false);
     assert.equal(res, "fallback");
+  });
+
+  it("askSecret: preserves defaults without exposing them in output", async () => {
+    const output: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => output.push(args.join(" "));
+    try {
+      const res = await askSecret(undefined, "S3 secret", "do-not-log", true);
+      assert.equal(res, "do-not-log");
+      assert.ok(output.every((line) => !line.includes("do-not-log")));
+      assert.ok(output.some((line) => line.includes("[configured]")));
+    } finally {
+      console.log = originalLog;
+    }
+
+    const mockRl = createSecretReadline("entered-secret\r\n");
+    const prompt = askSecret(mockRl.rl, "S3 secret", "fallback", false);
+    queueMicrotask(() => {
+      mockRl.input.emit("data", mockRl.answer);
+    });
+    assert.equal(await prompt, "entered-secret");
   });
 
   it("askChoice: selects default in non-interactive mode or without rl", async () => {

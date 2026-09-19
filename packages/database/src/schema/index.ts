@@ -2,6 +2,7 @@ import type { Kysely, Transaction } from "kysely";
 
 // Re-export all domain schema types
 export * from "./auth.schema.ts";
+export * from "./authorization.schema.ts";
 export * from "./courses.schema.ts";
 export * from "./media.schema.ts";
 export * from "./commerce.schema.ts";
@@ -17,10 +18,9 @@ export * from "./learning-progress.schema.ts";
 import type {
   AcademyTable,
   UserTable,
-  RoleTable,
   UserRoleTable,
   MenuTable,
-  PermissionTable,
+  MenuPermissionTable,
   SessionTable,
   OauthAccountTable,
   OtpCodeTable,
@@ -28,7 +28,16 @@ import type {
   UserTotpCredentialTable,
   MfaBackupCodeTable,
   WebauthnChallengeTable,
+  UserAvatarTable,
 } from "./auth.schema.ts";
+
+import type {
+  PermissionTable,
+  RoleTable,
+  RolePermissionTable,
+  RoleAssignmentTable,
+  FeatureTable,
+} from "./authorization.schema.ts";
 
 import type {
   CourseTable,
@@ -114,13 +123,17 @@ import type {
 import type { LearningProgressTable } from "./learning-progress.schema.ts";
 
 export interface Database {
-  // Auth & Academy
+  // Auth & Roles
   academy: AcademyTable;
   users: UserTable;
   roles: RoleTable;
   user_roles: UserRoleTable;
   menus: MenuTable;
+  menu_permissions: MenuPermissionTable;
   permissions: PermissionTable;
+  role_permissions: RolePermissionTable;
+  role_assignments: RoleAssignmentTable;
+  features: FeatureTable;
   sessions: SessionTable;
   oauth_accounts: OauthAccountTable;
   otp_codes: OtpCodeTable;
@@ -128,6 +141,7 @@ export interface Database {
   user_totp_credentials: UserTotpCredentialTable;
   mfa_backup_codes: MfaBackupCodeTable;
   webauthn_challenges: WebauthnChallengeTable;
+  user_avatars: UserAvatarTable;
 
   // Courses & Curriculum
   courses: CourseTable;
